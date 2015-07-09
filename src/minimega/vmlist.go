@@ -173,6 +173,8 @@ func (vms VMs) launch(name string, vmType VMType, ack chan int) error {
 	switch vmType {
 	case KVM:
 		vm = NewKVM(name)
+	case Android:
+		vm = NewAndroid(name)
 	default:
 		// TODO
 	}
@@ -258,6 +260,8 @@ func (vms VMs) info(vmType string) ([]string, [][]string, error) {
 	masks := vmMasks
 	if vmType == "kvm" {
 		masks = kvmMasks
+	} else if vmType == "android" {
+		masks = androidMasks
 	}
 
 vmLoop:

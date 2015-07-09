@@ -55,6 +55,12 @@ Additional fields are available for KVM-based VMs:
 - uuid      : QEMU system uuid
 - cc_active : whether cc is active
 
+Additional fields are available for Android-based VMs:
+
+- number    : telephone number of the VM
+
+Note: all KVM-based fields are available for Android-based VMs.
+
 Examples:
 
 Display a list of all IPs for all VMs:
@@ -68,6 +74,7 @@ Display information about all VMs:
 		Patterns: []string{
 			"vm info",
 			"vm info <kvm,>",
+			"vm info <android,>",
 		},
 		Call: wrapSimpleCLI(cliVmInfo),
 	},
@@ -109,6 +116,7 @@ line immediately instead of waiting on potential errors from launching the
 VM(s). The user must check logs or error states from vm info.`, Wildcard),
 		Patterns: []string{
 			"vm launch <kvm,> <name or count> [noblock,]",
+			"vm launch <android,> <name or count> [noblock,]",
 		},
 		Call: wrapSimpleCLI(cliVmLaunch),
 	},
@@ -712,6 +720,27 @@ Note: this configuration only applies to KVM-based VMs.`,
 			return cliVmConfigField(c, "snapshot")
 		}),
 	},
+	{ // vm config telephony
+		HelpShort: "configure the telephone network of a mobile VM",
+		HelpLong: `
+Set the telephone network number prefix for newly launched VMs. For example:
+
+	vm config telephony 223344
+
+Would cause newly launched VMs to be assigned numbers 2233440000, 2233440001,
+and so on. Number blocks should not overlap, the following produces and error:
+
+	vm config telephony 223344
+	vm config telephony 22334
+
+Note: this configuration only applies to Android-based VMs.`,
+		Patterns: []string{
+			"vm config telephony [prefix]",
+		},
+		Call: wrapSimpleCLI(func(c *minicli.Command) *minicli.Response {
+			return cliVmConfigField(c, "telephony")
+		}),
+	},
 	{ // clear vm config
 		HelpShort: "reset vm config to the default value",
 		HelpLong: `
@@ -744,6 +773,8 @@ to the default value.`,
 			"clear vm config <uuid,>",
 			"clear vm config <serial,>",
 			"clear vm config <virtio-serial,>",
+			// AndroidConfig
+			"clear vm config <telephony,>",
 		},
 		Call: wrapSimpleCLI(cliClearVmConfig),
 	},
@@ -790,6 +821,8 @@ func cliVmInfo(c *minicli.Command) *minicli.Response {
 	vmType := ""
 	if c.BoolArgs["kvm"] {
 		vmType = "kvm"
+	} else if c.BoolArgs["android"] {
+		vmType = "android"
 	}
 
 	for _, vm := range vms {
@@ -994,6 +1027,8 @@ func cliVmConfig(c *minicli.Command) *minicli.Response {
 			switch vm := vm.(type) {
 			case *KvmVM:
 				vmConfig.KVMConfig = *vm.KVMConfig.Copy()
+			case *AndroidVM:
+				vmConfig.AndroidConfig = *vm.AndroidConfig.Copy()
 			}
 		}
 	} else {
@@ -1019,6 +1054,8 @@ func cliVmConfigField(c *minicli.Command, field string) *minicli.Response {
 		config = &vmConfig.BaseConfig
 	} else if fns, ok = kvmConfigFns[field]; ok {
 		config = &vmConfig.KVMConfig
+	} else if fns, ok = androidConfigFns[field]; ok {
+		config = &vmConfig.AndroidConfig
 	} else {
 		log.Fatalln("unknown config field: `%s`", field)
 	}
@@ -1038,7 +1075,6 @@ func cliClearVmConfig(c *minicli.Command) *minicli.Response {
 	resp := &minicli.Response{Host: hostname}
 
 	var clearAll = len(c.BoolArgs) == 0
-	var clearKVM = clearAll || (len(c.BoolArgs) == 1 && c.BoolArgs["kvm"])
 	var cleared bool
 
 	for k, fns := range baseConfigFns {
@@ -1048,8 +1084,14 @@ func cliClearVmConfig(c *minicli.Command) *minicli.Response {
 		}
 	}
 	for k, fns := range kvmConfigFns {
-		if clearKVM || c.BoolArgs[k] {
+		if clearAll || c.BoolArgs[k] {
 			fns.Clear(&vmConfig.KVMConfig)
+			cleared = true
+		}
+	}
+	for k, fns := range androidConfigFns {
+		if clearAll || c.BoolArgs[k] {
+			fns.Clear(&vmConfig.AndroidConfig)
 			cleared = true
 		}
 	}

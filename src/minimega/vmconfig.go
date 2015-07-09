@@ -35,6 +35,14 @@ func mustKVMConfig(val interface{}) *KVMConfig {
 	return nil
 }
 
+func mustAndroidConfig(val interface{}) *AndroidConfig {
+	if val, ok := val.(*AndroidConfig); ok {
+		return val
+	}
+	log.Fatal("`%#v` is not a AndroidConfig", val)
+	return nil
+}
+
 // Functions for configuring VMs.
 var baseConfigFns = map[string]VMConfigFns{
 	"memory": vmConfigString(func(vm interface{}) *string {
@@ -156,6 +164,54 @@ var kvmConfigFns = map[string]VMConfigFns{
 				overrides = append(overrides, override)
 			}
 			return strings.Join(overrides, "\n")
+		},
+	},
+}
+
+// Functions for configuring Android-based VMs. Note: if keys overlap with
+// vmConfigFns, the functions in vmConfigFns take priority.
+var androidConfigFns = map[string]VMConfigFns{
+	"telephony": {
+		Update: func(v interface{}, c *minicli.Command) error {
+			vm := mustAndroidConfig(v)
+
+			num, err := normalizeNumber(c.StringArgs["prefix"])
+			if err != nil {
+				return err
+			}
+
+			for k := range telephonyAllocs {
+				p0 := strconv.Itoa(num)
+				p1 := strconv.Itoa(k)
+
+				// Check if the new prefix may have already been allocated
+				if strings.HasPrefix(p0, p1) || strings.HasPrefix(p1, p0) {
+					return fmt.Errorf("number prefix overlap --  new: %v, old: %v",
+						NumberPrefix(num), NumberPrefix(k))
+				}
+			}
+
+			if _, ok := telephonyAllocs[num]; !ok {
+				telephonyAllocs[num] = makeIDChan()
+			}
+
+			vm.NumberPrefix = num
+
+			return nil
+		},
+		Clear: func(vm interface{}) {
+			mustAndroidConfig(vm).NumberPrefix = -1
+		},
+		Print: func(vm interface{}) string {
+			return fmt.Sprintf("%v", NumberPrefix(mustAndroidConfig(vm).NumberPrefix))
+		},
+		PrintCLI: func(vm interface{}) string {
+			prefix := mustAndroidConfig(vm).NumberPrefix
+			if prefix == 0 {
+				return ""
+			}
+
+			return fmt.Sprintf("vm config telephony %d", prefix)
 		},
 	},
 }
