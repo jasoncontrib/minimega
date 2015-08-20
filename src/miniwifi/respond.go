@@ -22,31 +22,26 @@ func (m *Modem) handleCommand(command string) {
 		m.sayOk()
 		fmt.Printf(command + " - autoresponse: OK\n")
 	case isResponseMessage(cmd, &key): // side effect - key gets set
-		m.cOutput.Write([]byte(RESPONSE_MESSAGES[key]))
-		m.cOutput.Flush()
+		writeString(m.cOutput, RESPONSE_MESSAGES[key])
 		fmt.Printf(command+" - autoresponse: %s\n", RESPONSE_MESSAGES[key])
 	case strings.HasPrefix(cmd, "SCAN"):
 		m.sayOk()
 		fmt.Printf(command + " - autoresponse: OK | also writing \"CTRL-EVENT-SCAN-RESULTS\" to monitor socket\n")
-		m.mOutput.Write([]byte("IFNAME=eth0 CTRL-EVENT-SCAN-RESULTS\x00"))
-		m.mOutput.Flush()
+		writeString(m.mOutput, "IFNAME=eth0 CTRL-EVENT-SCAN-RESULTS\x00")
 	case strings.HasPrefix(cmd, "BSS RANGE=0-"): // SCAN RESULTS
 		fmt.Printf(command)
 		sr := m.getScanResults()
 		fmt.Printf(" - autoresponding with scan results\n")
-		m.cOutput.Write([]byte(sr))
-		m.cOutput.Flush()
+		writeString(m.cOutput, sr)
 	case strings.HasPrefix(cmd, "DRIVER WLS_BATCHING GET"): // BATCH SCAN RESULTS
 		fmt.Printf(command)
 		sr := m.getBatchedScanResults()
 		fmt.Printf(" - autoresponding with batched scan results\n")
-		m.cOutput.Write([]byte(sr))
-		m.cOutput.Flush()
+		writeString(m.cOutput, sr)
 	case strings.HasPrefix(cmd, "ADD_NETWORK"):
 		id := m.addNetwork()
 		fmt.Printf(command+" - autoresponse: %d\n", id)
-		m.cOutput.Write([]byte(fmt.Sprintf("%d", id)))
-		m.cOutput.Flush()
+		writeString(m.cOutput, strconv.Itoa(id))
 	case strings.HasPrefix(cmd, "REMOVE_NETWORK"):
 		m.removeNetwork(cmd)
 		fmt.Printf(command + " - autoresponse: OK\n")
@@ -71,8 +66,7 @@ func (m *Modem) handleCommand(command string) {
 			m.sayNull()
 		} else {
 			fmt.Printf(command+" - autoresponse: %s\n", value)
-			m.cOutput.Write([]byte(value))
-			m.cOutput.Flush()
+			writeString(m.cOutput, value)
 		}
 	case strings.HasPrefix(cmd, "ENABLE_NETWORK"):
 		m.enableNetwork(cmd)
@@ -93,9 +87,7 @@ func (m *Modem) handleCommand(command string) {
 			break
 		}
 		fmt.Printf(command + " - autoresponse: OK | also writing \"CTRL-EVENT-CONNECTED\" and \"CTRL-EVENT-STATE-CHANGE\" to monitor socket\n")
-		m.mOutput.Write([]byte(con))
-		m.mOutput.Write([]byte(sc))
-		m.mOutput.Flush()
+		writeString(m.mOutput, con, sc)
 		m.sayOk()
 	case strings.HasPrefix(cmd, "RECONNECT"):
 		if m.selectedNetwork < 0 || m.networks[m.selectedNetwork] == nil {
@@ -115,16 +107,13 @@ func (m *Modem) handleCommand(command string) {
 				break
 			}
 			fmt.Printf(command + " - autoresponse: OK | also writing \"CTRL-EVENT-CONNECTED\" and \"CTRL-EVENT-STATE-CHANGE\" to monitor socket\n")
-			m.mOutput.Write([]byte(con))
-			m.mOutput.Write([]byte(sc))
-			m.mOutput.Flush()
+			writeString(m.mOutput, con, sc)
 			m.sayOk()
 		}
 	case strings.HasPrefix(cmd, "DISCONNECT"):
 		m.selectedNetwork = -1
 		fmt.Printf(command + " - autoresponse: OK | also writing \"CTRL-EVENT-DISCONNECTED\" to monitor socket\n")
-		m.mOutput.Write([]byte("IFNAME=eth0 CTRL-EVENT-DISCONNECTED\x00"))
-		m.mOutput.Flush()
+		writeString(m.mOutput, "IFNAME=eth0 CTRL-EVENT-DISCONNECTED\x00")
 		m.sayOk()
 	case strings.HasPrefix(cmd, "SIGNAL_POLL"):
 		sr, err := m.getSignal()
@@ -132,8 +121,7 @@ func (m *Modem) handleCommand(command string) {
 			fmt.Printf(command+" - autoresponse: FAIL - error: %s\n", err)
 			m.sayFail()
 		} else {
-			m.cOutput.Write([]byte(sr))
-			m.cOutput.Flush()
+			writeString(m.cOutput, sr)
 			fmt.Printf(command + " - autoresponding with signal results\n")
 		}
 	case strings.HasPrefix(cmd, "LIST_NETWORKS"):
@@ -142,8 +130,7 @@ func (m *Modem) handleCommand(command string) {
 			fmt.Printf(command+" - autoresponse: FAIL - error: %s\n", err)
 			m.sayFail()
 		} else {
-			m.cOutput.Write([]byte(nr))
-			m.cOutput.Flush()
+			writeString(m.cOutput, nr)
 			fmt.Printf(command+" - autoresponding with networks: %s\n", nr)
 			//fmt.Printf(command+" - autoresponding with networks\n")
 		}
@@ -153,8 +140,7 @@ func (m *Modem) handleCommand(command string) {
 			fmt.Printf(command+" - autoresponse: FAIL - error: %s\n", err)
 			m.sayFail()
 		} else {
-			m.cOutput.Write([]byte(sr))
-			m.cOutput.Flush()
+			writeString(m.cOutput, sr)
 			fmt.Printf(command+" - autoresponding with status: %s\n", sr)
 			//fmt.Printf(command+" - autoresponding with status\n")
 		}
