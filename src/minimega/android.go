@@ -26,8 +26,9 @@ import (
 const (
 	// GPS: 0
 	// Telephony: 1
-	// Wifi: 2,3
-	AndroidSerialPorts = 4
+	AndroidSerialPorts = 2
+	// Wifi: 0,1
+	AndroidVirtioPorts = 2
 )
 
 type NumberPrefix int
@@ -110,6 +111,12 @@ func NewAndroid(name string) *AndroidVM {
 
 	vm.SerialPorts += AndroidSerialPorts
 
+	if vm.VirtioPorts != 0 {
+		log.Info("incrementing number of virtio ports by %d for mobile sensors", AndroidVirtioPorts)
+	}
+
+	vm.VirtioPorts += AndroidVirtioPorts
+
 	return vm
 }
 
@@ -173,8 +180,8 @@ func (vm *AndroidVM) Launch(ack chan int) error {
 
 		// Setup the wifi
 		vm.wifiModem, err = miniwifi.NewModem(
-			path.Join(vm.instancePath, "serial2"), // hard coded based on Android vm image
-			path.Join(vm.instancePath, "serial3"), // hard coded based on Android vm image
+			path.Join(vm.instancePath, "virtio-serial0"), // hard coded based on Android vm image
+			path.Join(vm.instancePath, "virtio-serial1"), // hard coded based on Android vm image
 		)
 		if err != nil {
 			log.Error("start wifi modem: %v", err)
