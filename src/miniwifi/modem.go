@@ -25,6 +25,8 @@ type Modem struct {
 	cInput, mInput           *bufio.Reader
 	cOutput, mOutput         *bufio.Writer
 
+	kill chan bool
+
 	networks        map[int]map[string]string // map of ids to map of network properties
 	selectedNetwork int
 	scanResults     []*ScanResult
@@ -35,6 +37,7 @@ func NewModem(controlPath, monitorPath string) (*Modem, error) {
 	m := &Modem{
 		controlPath:     controlPath,
 		monitorPath:     monitorPath,
+		kill:            make(chan bool),
 		networks:        make(map[int]map[string]string),
 		selectedNetwork: -1,
 	}
@@ -91,11 +94,30 @@ func (m *Modem) Run() {
 	// read from control in, match up with a response, respond on control out
 	// (and sometimes monitor out)
 	for {
-		command := m.readCommand()
-		if command != "" {
+		switch {
+		case <-m.kill:
+			break
+		default:
+		}
+
+		command, err := m.readCommand()
+		if err == io.EOF {
+			log.Debug("readCommand received EOF - exiting")
+			break
+		} else if err != nil {
+			log.Error("readCommand error: %s", err)
+		} else {
 			m.handleCommand(command)
 		}
 	}
+
+	// Close all the things
+	m.controlConn.Close()
+	m.monitorConn.Close()
+}
+
+func (m *Modem) Close() {
+	close(m.kill)
 }
 
 func (m *Modem) UpdateScanResults(ssids ...string) {
@@ -116,18 +138,10 @@ func (m *Modem) UpdateScanResults(ssids ...string) {
 	return
 }
 
-func (m *Modem) readCommand() string {
+func (m *Modem) readCommand() (string, error) {
 	b, err := m.cInput.ReadBytes('\x00')
 	if err != nil {
-		if err == io.EOF {
-			// TODO: terminate
-			/*
-				log.Error("readCommand received EOF - exiting\n")
-				os.Exit(3)
-			*/
-		}
-		log.Error("readCommand error: %s\n", err)
-		return ""
+		return "", err
 	}
-	return string(b)
+	return string(b), nil
 }

@@ -147,8 +147,7 @@ func (m *Modem) handleCommand(command string) {
 		}
 	default:
 		log.Debug(command)
-		exit := false
-		for !exit {
+		for {
 			bytes, _ := ioutil.ReadAll(os.Stdin)
 			if bytes[0] == '|' { // signal to send to m.monitorOut
 				m.mOutput.Write(bytes[1:])
@@ -156,7 +155,7 @@ func (m *Modem) handleCommand(command string) {
 			} else {
 				m.cOutput.Write(bytes)
 				m.cOutput.Flush()
-				exit = true
+				break
 			}
 		}
 	}
