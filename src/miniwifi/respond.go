@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	log "minilog"
 	"os"
 	"regexp"
 	"strconv"
@@ -20,132 +21,132 @@ func (m *Modem) handleCommand(command string) {
 	switch {
 	case isOkMessage(cmd):
 		m.sayOk()
-		fmt.Printf(command + " - autoresponse: OK\n")
+		log.Debug(command + " - autoresponse: OK\n")
 	case isResponseMessage(cmd, &key): // side effect - key gets set
 		writeString(m.cOutput, RESPONSE_MESSAGES[key])
-		fmt.Printf(command+" - autoresponse: %s\n", RESPONSE_MESSAGES[key])
+		log.Debug(command+" - autoresponse: %s\n", RESPONSE_MESSAGES[key])
 	case strings.HasPrefix(cmd, "SCAN"):
 		m.sayOk()
-		fmt.Printf(command + " - autoresponse: OK | also writing \"CTRL-EVENT-SCAN-RESULTS\" to monitor socket\n")
+		log.Debug(command + " - autoresponse: OK | also writing \"CTRL-EVENT-SCAN-RESULTS\" to monitor socket\n")
 		writeString(m.mOutput, "IFNAME=eth0 CTRL-EVENT-SCAN-RESULTS\x00")
 	case strings.HasPrefix(cmd, "BSS RANGE=0-"): // SCAN RESULTS
-		fmt.Printf(command)
+		log.Debug(command)
 		sr := m.getScanResults()
-		fmt.Printf(" - autoresponding with scan results\n")
+		log.Debug(" - autoresponding with scan results\n")
 		writeString(m.cOutput, sr)
 	case strings.HasPrefix(cmd, "DRIVER WLS_BATCHING GET"): // BATCH SCAN RESULTS
-		fmt.Printf(command)
+		log.Debug(command)
 		sr := m.getBatchedScanResults()
-		fmt.Printf(" - autoresponding with batched scan results\n")
+		log.Debug(" - autoresponding with batched scan results\n")
 		writeString(m.cOutput, sr)
 	case strings.HasPrefix(cmd, "ADD_NETWORK"):
 		id := m.addNetwork()
-		fmt.Printf(command+" - autoresponse: %d\n", id)
+		log.Debug(command+" - autoresponse: %d\n", id)
 		writeString(m.cOutput, strconv.Itoa(id))
 	case strings.HasPrefix(cmd, "REMOVE_NETWORK"):
 		m.removeNetwork(cmd)
-		fmt.Printf(command + " - autoresponse: OK\n")
+		log.Debug(command + " - autoresponse: OK\n")
 		m.sayOk()
 	case strings.HasPrefix(cmd, "DISABLE_NETWORK"):
 		m.disableNetwork(cmd)
-		fmt.Printf(command + " - autoresponse: OK\n")
+		log.Debug(command + " - autoresponse: OK\n")
 		m.sayOk()
 	case strings.HasPrefix(cmd, "SET_NETWORK"):
 		success := m.setNetworkProperty(cmd)
 		if success {
-			fmt.Printf(command + " - autoresponse: OK\n")
+			log.Debug(command + " - autoresponse: OK\n")
 			m.sayOk()
 		} else {
-			fmt.Printf(command + " - could not parse\n")
+			log.Debug(command + " - could not parse\n")
 			m.sayNull()
 		}
 	case strings.HasPrefix(cmd, "GET_NETWORK"):
 		value := m.getNetworkProperty(cmd)
 		if value == "" {
-			fmt.Printf(command + " - could not parse, responding NULL\n")
+			log.Debug(command + " - could not parse, responding NULL\n")
 			m.sayNull()
 		} else {
-			fmt.Printf(command+" - autoresponse: %s\n", value)
+			log.Debug(command+" - autoresponse: %s\n", value)
 			writeString(m.cOutput, value)
 		}
 	case strings.HasPrefix(cmd, "ENABLE_NETWORK"):
 		m.enableNetwork(cmd)
-		fmt.Printf(command + " - autoresponse: OK\n")
+		log.Debug(command + " - autoresponse: OK\n")
 		m.sayOk()
 	case strings.HasPrefix(cmd, "SELECT_NETWORK"):
 		m.selectNetwork(cmd)
 		con, err := m.getConnectedString()
 		if err != nil {
-			fmt.Printf(command+" - autoresponse: OK | error with connection: %s", err.Error())
+			log.Debug(command+" - autoresponse: OK | error with connection: %s", err.Error())
 			m.sayOk()
 			break
 		}
 		sc, err := m.getStateChangeString()
 		if err != nil {
-			fmt.Printf(command+" - autoresponse: OK | error with state change: %s", err.Error())
+			log.Debug(command+" - autoresponse: OK | error with state change: %s", err.Error())
 			m.sayOk()
 			break
 		}
-		fmt.Printf(command + " - autoresponse: OK | also writing \"CTRL-EVENT-CONNECTED\" and \"CTRL-EVENT-STATE-CHANGE\" to monitor socket\n")
+		log.Debug(command + " - autoresponse: OK | also writing \"CTRL-EVENT-CONNECTED\" and \"CTRL-EVENT-STATE-CHANGE\" to monitor socket\n")
 		writeString(m.mOutput, con, sc)
 		m.sayOk()
 	case strings.HasPrefix(cmd, "RECONNECT"):
 		if m.selectedNetwork < 0 || m.networks[m.selectedNetwork] == nil {
-			fmt.Printf(command + " - autoresponse: NULL - no selected network\n")
+			log.Debug(command + " - autoresponse: NULL - no selected network\n")
 			m.sayNull()
 		} else {
 			con, err := m.getConnectedString()
 			if err != nil {
-				fmt.Printf(command+" - autoresponse: OK | error with connection: %s", err.Error())
+				log.Debug(command+" - autoresponse: OK | error with connection: %s", err.Error())
 				m.sayOk()
 				break
 			}
 			sc, err := m.getStateChangeString()
 			if err != nil {
-				fmt.Printf(command+" - autoresponse: OK | error with state change: %s", err.Error())
+				log.Debug(command+" - autoresponse: OK | error with state change: %s", err.Error())
 				m.sayOk()
 				break
 			}
-			fmt.Printf(command + " - autoresponse: OK | also writing \"CTRL-EVENT-CONNECTED\" and \"CTRL-EVENT-STATE-CHANGE\" to monitor socket\n")
+			log.Debug(command + " - autoresponse: OK | also writing \"CTRL-EVENT-CONNECTED\" and \"CTRL-EVENT-STATE-CHANGE\" to monitor socket\n")
 			writeString(m.mOutput, con, sc)
 			m.sayOk()
 		}
 	case strings.HasPrefix(cmd, "DISCONNECT"):
 		m.selectedNetwork = -1
-		fmt.Printf(command + " - autoresponse: OK | also writing \"CTRL-EVENT-DISCONNECTED\" to monitor socket\n")
+		log.Debug(command + " - autoresponse: OK | also writing \"CTRL-EVENT-DISCONNECTED\" to monitor socket\n")
 		writeString(m.mOutput, "IFNAME=eth0 CTRL-EVENT-DISCONNECTED\x00")
 		m.sayOk()
 	case strings.HasPrefix(cmd, "SIGNAL_POLL"):
 		sr, err := m.getSignal()
 		if err != nil {
-			fmt.Printf(command+" - autoresponse: FAIL - error: %s\n", err)
+			log.Debug(command+" - autoresponse: FAIL - error: %s\n", err)
 			m.sayFail()
 		} else {
 			writeString(m.cOutput, sr)
-			fmt.Printf(command + " - autoresponding with signal results\n")
+			log.Debug(command + " - autoresponding with signal results\n")
 		}
 	case strings.HasPrefix(cmd, "LIST_NETWORKS"):
 		nr, err := m.getNetworks()
 		if err != nil {
-			fmt.Printf(command+" - autoresponse: FAIL - error: %s\n", err)
+			log.Debug(command+" - autoresponse: FAIL - error: %s\n", err)
 			m.sayFail()
 		} else {
 			writeString(m.cOutput, nr)
-			fmt.Printf(command+" - autoresponding with networks: %s\n", nr)
-			//fmt.Printf(command+" - autoresponding with networks\n")
+			log.Debug(command+" - autoresponding with networks: %s\n", nr)
+			//log.Debug(command+" - autoresponding with networks\n")
 		}
 	case strings.HasPrefix(cmd, "STATUS"):
 		sr, err := m.getStatus()
 		if err != nil {
-			fmt.Printf(command+" - autoresponse: FAIL - error: %s\n", err)
+			log.Debug(command+" - autoresponse: FAIL - error: %s\n", err)
 			m.sayFail()
 		} else {
 			writeString(m.cOutput, sr)
-			fmt.Printf(command+" - autoresponding with status: %s\n", sr)
-			//fmt.Printf(command+" - autoresponding with status\n")
+			log.Debug(command+" - autoresponding with status: %s\n", sr)
+			//log.Debug(command+" - autoresponding with status\n")
 		}
 	default:
-		fmt.Printf(command)
+		log.Debug(command)
 		exit := false
 		for !exit {
 			bytes, _ := ioutil.ReadAll(os.Stdin)
@@ -158,7 +159,6 @@ func (m *Modem) handleCommand(command string) {
 				exit = true
 			}
 		}
-		fmt.Printf("\n") // print a newline so we aren't tempted to end each line with a newline
 	}
 }
 

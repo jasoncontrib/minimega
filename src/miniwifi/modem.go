@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	log "minilog"
 	"net"
 	"os"
 )
@@ -121,11 +122,11 @@ func (m *Modem) readCommand() string {
 		if err == io.EOF {
 			// TODO: terminate
 			/*
-				fmt.Printf("readCommand received EOF - exiting\n")
+				log.Error("readCommand received EOF - exiting\n")
 				os.Exit(3)
 			*/
 		}
-		fmt.Printf("readCommand error: %s\n", err)
+		log.Error("readCommand error: %s\n", err)
 		return ""
 	}
 	return string(b)
