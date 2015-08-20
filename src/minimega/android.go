@@ -14,6 +14,7 @@ import (
 	"minicli"
 	log "minilog"
 	"minimodem"
+	"miniwifi"
 	"net"
 	"path"
 	"strconv"
@@ -23,7 +24,10 @@ import (
 )
 
 const (
-	AndroidSerialPorts = 2
+	// GPS: 0
+	// Telephony: 1
+	// Wifi: 2,3
+	AndroidSerialPorts = 4
 )
 
 type NumberPrefix int
@@ -36,7 +40,8 @@ type AndroidVM struct {
 	KvmVM         // embed
 	AndroidConfig // embed
 
-	Modem *minimodem.Modem
+	Modem     *minimodem.Modem
+	wifiModem *miniwifi.Modem
 
 	gpsPath   string        // path to socket for communicating with vm
 	gpsConn   net.Conn      // connection to GPS socket
@@ -155,7 +160,7 @@ func (vm *AndroidVM) Launch(ack chan int) error {
 			outChan,
 		)
 		if err != nil {
-			log.Error("start telephony sensor: %v", err)
+			log.Error("start telephony modem: %v", err)
 			vm.setState(VM_ERROR)
 			return
 		}
@@ -165,6 +170,19 @@ func (vm *AndroidVM) Launch(ack chan int) error {
 
 		// Read from the modem's outbox periodically and send out the messages
 		go vm.runPostman(outChan)
+
+		// Setup the wifi
+		vm.wifiModem, err = miniwifi.NewModem(
+			path.Join(vm.instancePath, "serial2"), // hard coded based on Android vm image
+			path.Join(vm.instancePath, "serial3"), // hard coded based on Android vm image
+		)
+		if err != nil {
+			log.Error("start wifi modem: %v", err)
+			vm.setState(VM_ERROR)
+			return
+		}
+
+		go vm.wifiModem.Run()
 	}()
 
 	return nil
@@ -341,4 +359,8 @@ func (vm *AndroidVM) PushGPS(nmea string) error {
 	vm.gpsWriter.WriteString(nmea)
 	vm.gpsWriter.WriteString("\n")
 	return vm.gpsWriter.Flush()
+}
+
+func (vm *AndroidVM) SetWifiSSIDs(ssid ...string) {
+	vm.wifiModem.UpdateScanResults(ssid...)
 }
