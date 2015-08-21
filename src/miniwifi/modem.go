@@ -34,6 +34,8 @@ type Modem struct {
 }
 
 func NewModem(controlPath, monitorPath string) (*Modem, error) {
+	log.Debug("creating miniwifi modem: %v %v", controlPath, monitorPath)
+
 	m := &Modem{
 		controlPath:     controlPath,
 		monitorPath:     monitorPath,
@@ -94,7 +96,7 @@ func (m *Modem) Run() {
 	// read from control in, match up with a response, respond on control out
 	// (and sometimes monitor out)
 	for {
-		switch {
+		select {
 		case <-m.kill:
 			break
 		default:

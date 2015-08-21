@@ -129,9 +129,8 @@ func (vm *AndroidVM) Launch(ack chan int) error {
 	// it's thing.
 	localAck := make(chan int)
 
-	// Call "super" Launch
-	err := vm.KvmVM.Launch(localAck)
-	if err != nil {
+	// Call "super" Launch which is asynchronous for KvmVMs
+	if err := vm.KvmVM.Launch(localAck); err != nil {
 		return err
 	}
 
@@ -139,6 +138,12 @@ func (vm *AndroidVM) Launch(ack chan int) error {
 	go func() {
 		<-localAck
 		defer func() { ack <- vm.ID }()
+
+		if vm.GetState() == VM_ERROR {
+			return
+		}
+
+		var err error
 
 		// Initialize GPS
 		vm.gpsPath = path.Join(vm.instancePath, "serial0")
