@@ -89,7 +89,7 @@ func (m *Modem) cregmsg() {
 	for {
 		if creg != m.status.creg && m.status.creg == 2 {
 			m.output.WriteString("\r\n+CREG: 1,\"036D\",\"58B2\"\r\n" + msgOK)
-			log.Debug("sent unsolicited CREG message")
+			//log.Debug("sent unsolicited CREG message")
 			creg = m.status.creg
 		}
 		time.Sleep(time.Second * 10)
@@ -103,7 +103,7 @@ func (m *Modem) cgregmsg() {
 	for {
 		if cgreg != m.status.cgreg && m.status.cgreg == 1 {
 			m.output.WriteString("\r\n+CGREG: 1\r\n" + msgOK)
-			log.Debug("sent unsolicited CGREG message")
+			//log.Debug("sent unsolicited CGREG message")
 			cgreg = m.status.cgreg
 		}
 		time.Sleep(time.Second * 10)
@@ -157,7 +157,7 @@ func (m *Modem) parseQuery(s string) (ret string, waserror bool) {
 			ret = ret + "\"00101\""
 		}
 		ret = ret + "\r\n"
-		log.Debug("> %s", ret)
+		//log.Debug("> %s", ret)
 	}
 	return
 }
@@ -178,18 +178,18 @@ func (m *Modem) parseAssignment(s string) (ret string, waserror bool) {
 
 	switch subs[0] {
 	case "CGREG":
-		log.Debug("setting CGREG to %s\n", args[0])
+		//log.Debug("setting CGREG to %s\n", args[0])
 		m.status.cgreg, _ = strconv.Atoi(args[0])
 		ret = "\r\n+CGREG: " + args[0] + "\r\n"
 	case "CREG":
-		log.Debug("setting CREG to %s\n", args[0])
+		//log.Debug("setting CREG to %s\n", args[0])
 		m.status.creg, _ = strconv.Atoi(args[0])
 	case "CPIN":
-		log.Debug(s)
+		//log.Debug(s)
 		m.status.pin, _ = strconv.Atoi(args[0])
-		log.Debug("storing %d as the new pin, expected pin = %d\n", m.status.pin, expectedpin)
+		//log.Debug("storing %d as the new pin, expected pin = %d\n", m.status.pin, expectedpin)
 	case "CMGF":
-		log.Debug("setting CMGF to %s\n", args[0])
+		//log.Debug("setting CMGF to %s\n", args[0])
 		m.status.cmgf, _ = strconv.Atoi(args[0])
 	case "COPS":
 		if mode, _ := strconv.Atoi(args[0]); mode == 3 {
@@ -214,7 +214,7 @@ func (m *Modem) parseAssignment(s string) (ret string, waserror bool) {
 			m.output.WriteString("\r\n> ")
 			m.output.Flush()
 			input, _ := m.input.ReadString('') // ctrl-z
-			log.Debug("read message %v", input)
+			//log.Debug("read message %v", input)
 			input = input[:len(input)-1]
 			msg, err := pduSmsUnpack(input)
 			if err != nil {
@@ -261,6 +261,8 @@ func (*Modem) otherMessage(s string) (ret string, waserror bool) {
 }
 
 func NewModem(number int, path string, mChan chan Message) (*Modem, error) {
+	log.Debug("creating minimodem: %v %v", number, path)
+
 	modem := &Modem{ // return value
 		Number:      number,
 		socketPath:  path,
@@ -320,7 +322,7 @@ func (m *Modem) Run() error {
 		if len(line) <= 1 {                         // if this line is blank (or only one character)
 			continue // grab another line
 		}
-		log.Debug("< " + line + "\n")
+		//log.Debug("< " + line + "\n")
 		subs := strings.Split(line, ";") // split command into subcommands (if applicable)
 
 		// process all subcommands and build up response string
@@ -347,7 +349,7 @@ func (m *Modem) Run() error {
 		}
 
 		// send response to device
-		log.Debug("> %s\n", out)
+		//log.Debug("> %s\n", out)
 		m.output.WriteString(out)
 		m.output.Flush()
 	}
