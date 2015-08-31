@@ -26,7 +26,8 @@ import (
 const (
 	// GPS: 0
 	// Telephony: 1
-	AndroidSerialPorts = 2
+	// Accelerometer: 2
+	AndroidSerialPorts = 3
 	// Wifi: 0,1
 	AndroidVirtioPorts = 2
 )
@@ -67,6 +68,8 @@ func init() {
 	for _, fns := range androidConfigFns {
 		fns.Clear(&vmConfig.AndroidConfig)
 	}
+
+	telephonyAllocs[vmConfig.NumberPrefix] = make(chan int)
 }
 
 // Copy makes a deep copy and returns reference to the new struct.

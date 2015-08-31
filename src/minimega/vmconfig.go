@@ -200,7 +200,7 @@ var androidConfigFns = map[string]VMConfigFns{
 			return nil
 		},
 		Clear: func(vm interface{}) {
-			mustAndroidConfig(vm).NumberPrefix = -1
+			mustAndroidConfig(vm).NumberPrefix = 1
 		},
 		Print: func(vm interface{}) string {
 			return fmt.Sprintf("%v", NumberPrefix(mustAndroidConfig(vm).NumberPrefix))

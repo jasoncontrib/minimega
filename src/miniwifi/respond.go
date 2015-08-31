@@ -174,7 +174,11 @@ func (m *Modem) getScanResults() string {
 		s += fmt.Sprintf("ssid=%s\n", sr.ssid)
 		s += "====\n"
 	}
-	s += "####"
+	if s == "" {
+		s = "\x00"
+	} else {
+		s += "####"
+	}
 	return s
 }
 
