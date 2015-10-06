@@ -38,6 +38,12 @@ type AndroidConfig struct {
 	NumberPrefix int
 }
 
+type wifiNet struct {
+	vlan	int
+	ssid	string
+	bridge	string
+}
+
 type AndroidVM struct {
 	KvmVM         // embed
 	AndroidConfig // embed
@@ -50,6 +56,8 @@ type AndroidVM struct {
 	gpsWriter *bufio.Writer // writer for GPS socket
 
 	Number int
+
+	wifiNets	map[string]wifiNet	// map ssid to vlan/bridge
 }
 
 // Ensure that vmAndroid implements the VM interface
@@ -198,6 +206,17 @@ func (vm *AndroidVM) Launch(ack chan int) error {
 		}
 
 		go vm.wifiModem.Run()
+
+		go func() {
+			for {
+				network := <- vm.wifiModem.NetworkNameChan
+				log.Debug("VM %v changed to wifi network named %v", vm.GetName(), network)
+				if net, ok := vm.wifiNets[network]; ok {
+					log.Debug("VM %v switching to vlan %v on bridge %v", vm.GetName(), net.vlan, net.bridge)
+					vm.NetworkConnect(0, net.bridge, net.vlan)
+				}
+			}
+		}()
 	}()
 
 	return nil
@@ -376,6 +395,26 @@ func (vm *AndroidVM) PushGPS(nmea string) error {
 	return vm.gpsWriter.Flush()
 }
 
-func (vm *AndroidVM) SetWifiSSIDs(ssid ...string) {
-	vm.wifiModem.UpdateScanResults(ssid...)
+func (vm *AndroidVM) SetWifiSSIDs(ssids ...string) {
+	vm.wifiNets = make(map[string]wifiNet)
+	names := []string{}
+	for _, s := range ssids {
+		var bridge string
+		parts := strings.Split(s, ",")
+		if len(parts) < 2 || len(parts) > 3 {
+			continue
+		}
+		if len(parts) == 3 {
+			bridge = parts[2]
+		} else {
+			bridge = DEFAULT_BRIDGE
+		}
+		vlan, err := strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		vm.wifiNets[parts[0]] = wifiNet{ vlan, parts[0], bridge }
+		names = append(names, parts[0])
+	}
+	vm.wifiModem.UpdateScanResults(names...)
 }

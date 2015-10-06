@@ -226,6 +226,7 @@ func (m *Modem) selectNetwork(cmd string) {
 		return
 	}
 	m.selectedNetwork = id
+	m.NetworkNameChan <- m.scanResults[id].ssid
 }
 
 func (m *Modem) removeNetwork(cmd string) {

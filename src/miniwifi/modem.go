@@ -31,6 +31,8 @@ type Modem struct {
 	selectedNetwork int
 	scanResults     []*ScanResult
 	netIdChan       chan int
+
+	NetworkNameChan		chan string	// We put the name of the current wifi network on here
 }
 
 func NewModem(controlPath, monitorPath string) (*Modem, error) {
@@ -55,6 +57,8 @@ func NewModem(controlPath, monitorPath string) (*Modem, error) {
 			m.netIdChan <- i
 		}
 	}()
+
+	m.NetworkNameChan = make(chan string)
 
 	return m, nil
 }

@@ -14,11 +14,17 @@ var wifiCLIHandlers = []minicli.Handler{
 		HelpShort: "update the available wifi access points",
 		HelpLong: `Update the available wifi access points.
 
-Takes a list of SSIDs that should show up in Android, for example:
+Takes a list of SSIDs that should show up in Android. Each SSID should
+be associated with a particular VLAN and optionally a bridge, formatted
+as <SSID>,<VLAN>,<BRIDGE>. For example:
 
-wifi 0 minitel mininet`,
+	wifi 0 minitel,100 mininet,200,my_bridge
+
+specifies two wifi networks, the first named "minitel" on VLAN 100 of the
+default mega_bridge, the second named "mininet" on VLAN 200 of a bridge
+called "my_bridge".`,
 		Patterns: []string{
-			"wifi <vm id or name> [ssid]...",
+			"wifi <vm id or name> [ssidspec]...",
 		},
 		Call: wrapSimpleCLI(cliWifi),
 	},
@@ -43,10 +49,10 @@ func cliWifi(c *minicli.Command) *minicli.Response {
 		vm = vm2
 	}
 
-	if len(c.ListArgs["ssid"]) == 0 {
+	if len(c.ListArgs["ssidspec"]) == 0 {
 		resp.Response = "TODO"
 	} else {
-		vm.SetWifiSSIDs(c.ListArgs["ssid"]...)
+		vm.SetWifiSSIDs(c.ListArgs["ssidspec"]...)
 	}
 
 	return resp
