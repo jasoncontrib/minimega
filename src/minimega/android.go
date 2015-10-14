@@ -38,10 +38,58 @@ type AndroidConfig struct {
 	NumberPrefix int
 }
 
-type wifiNet struct {
-	vlan	int
-	ssid	string
-	bridge	string
+type accessPoint struct {
+	ssid   string
+	vlan   int
+	bridge string
+	loc    location
+	power  int     // power is in dBm, not milliwatts!
+	mW     float64 // We keep this for display
+}
+
+// Calculate the signal strength in dBm of the access point as seen
+// from the given location.
+func (ap *accessPoint) signalStrength(loc location) float64 {
+	// Wifi frequency is approximately 2400 MHz
+	f := 2400.0
+	// Find distance in meters
+	d := locationDistance(loc, ap.loc)
+	if d == 0 {
+		d = 0.01
+	}
+	fmt.Printf("signalStrength: distance = %v meters\n", d)
+
+	// Calculate Free-Space Path Loss
+	// 27.55 is the constant for meters & megahertz
+	fspl := 20*math.Log10(d) + 20*math.Log10(f) - 27.55
+
+	signal := float64(ap.power) - fspl
+	fmt.Printf("signalStrength: fspl = %v, signal = %v\n", fspl, signal)
+	return signal
+}
+
+type location struct {
+	lat      float64
+	long     float64
+	accuracy float64
+}
+
+// Returns a distance, in meters, between two locations
+func locationDistance(p1, p2 location) float64 {
+	R := 6371000.0 // metres
+	φ1 := p1.lat * math.Pi / 180
+	φ2 := p2.lat * math.Pi / 180
+	Δφ := (p2.lat - p1.lat) * math.Pi / 180
+	Δλ := (p2.long - p1.long) * math.Pi / 180
+
+	a := math.Sin(Δφ/2)*math.Sin(Δφ/2) +
+		math.Cos(φ1)*math.Cos(φ2)*
+			math.Sin(Δλ/2)*math.Sin(Δλ/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	d := R * c
+
+	return d
 }
 
 type AndroidVM struct {
@@ -51,14 +99,17 @@ type AndroidVM struct {
 	Modem     *minimodem.Modem
 	wifiModem *miniwifi.Modem
 
-	gpsPath   string        // path to socket for communicating with vm
-	gpsConn   net.Conn      // connection to GPS socket
-	gpsWriter *bufio.Writer // writer for GPS socket
+	gpsPath      string        // path to socket for communicating with vm
+	gpsConn      net.Conn      // connection to GPS socket
+	gpsWriter    *bufio.Writer // writer for GPS socket
+	lastLocation location      // the most recent location of this phone
 
 	Number int
 
-	wifiNets	map[string]wifiNet	// map ssid to vlan/bridge
+	accessPoints map[string]accessPoint // map ssid to vlan/bridge
 }
+
+var wifiAPs map[string]accessPoint // Global collection of access points
 
 // Ensure that vmAndroid implements the VM interface
 var _ VM = (*AndroidVM)(nil)
@@ -78,6 +129,8 @@ func init() {
 	}
 
 	telephonyAllocs[vmConfig.NumberPrefix] = make(chan int)
+
+	wifiAPs = make(map[string]accessPoint)
 }
 
 // Copy makes a deep copy and returns reference to the new struct.
@@ -209,9 +262,9 @@ func (vm *AndroidVM) Launch(ack chan int) error {
 
 		go func() {
 			for {
-				network := <- vm.wifiModem.NetworkNameChan
+				network := <-vm.wifiModem.NetworkNameChan
 				log.Debug("VM %v changed to wifi network named %v", vm.GetName(), network)
-				if net, ok := vm.wifiNets[network]; ok {
+				if net, ok := vm.accessPoints[network]; ok {
 					log.Debug("VM %v switching to vlan %v on bridge %v", vm.GetName(), net.vlan, net.bridge)
 					vm.NetworkConnect(0, net.bridge, net.vlan)
 				}
@@ -388,33 +441,93 @@ func toNMEAString(lat, long, accuracy float64) string {
 	return nmea + hex.EncodeToString([]byte{checksum})
 }
 
+func fromNMEA(nmea string) (location, error) {
+	parts := strings.Split(nmea, ",")
+	if len(parts) < 6 {
+		return location{}, errors.New("overly short string")
+	}
+
+	lat, err := strconv.ParseFloat(parts[2], 64)
+	if err != nil {
+		return location{}, err
+	}
+	latCard := parts[3]
+	long, err := strconv.ParseFloat(parts[4], 64)
+	if err != nil {
+		return location{}, err
+	}
+	longCard := parts[5]
+
+	latInt := math.Trunc(lat / 100)
+	latRemainder := lat - latInt*100
+	latCoord := latInt + (latRemainder / 60)
+	if latCard == "S" {
+		latCoord *= -1
+	}
+
+	longInt := math.Trunc(long / 100)
+	longRemainder := long - longInt*100
+	longCoord := longInt + (longRemainder / 60)
+	if longCard == "W" {
+		longCoord *= -1
+	}
+
+	location := location{lat: latCoord, long: longCoord, accuracy: 1.0}
+
+	return location, nil
+}
+
 func (vm *AndroidVM) PushGPS(nmea string) error {
 	log.Debug("Writing NMEA to VM: `%s`", nmea)
+	location, err := fromNMEA(nmea)
+	if err != nil {
+		return err
+	}
+	vm.lastLocation = location
 	vm.gpsWriter.WriteString(nmea)
 	vm.gpsWriter.WriteString("\n")
 	return vm.gpsWriter.Flush()
 }
 
 func (vm *AndroidVM) SetWifiSSIDs(ssids ...string) {
-	vm.wifiNets = make(map[string]wifiNet)
-	names := []string{}
-	for _, s := range ssids {
-		var bridge string
-		parts := strings.Split(s, ",")
-		if len(parts) < 2 || len(parts) > 3 {
-			continue
+	/*
+		vm.accessPoints = make(map[string]accessPoint)
+		names := []string{}
+		for _, s := range ssids {
+			var bridge string
+			parts := strings.Split(s, ",")
+			if len(parts) < 2 || len(parts) > 3 {
+				continue
+			}
+			if len(parts) == 3 {
+				bridge = parts[2]
+			} else {
+				bridge = DEFAULT_BRIDGE
+			}
+			vlan, err := strconv.Atoi(parts[1])
+			if err != nil {
+				continue
+			}
+			vm.accessPoints[parts[0]] = accessPoint{ vlan: vlan, ssid: parts[0], bridge: bridge }
+			names = append(names, parts[0])
 		}
-		if len(parts) == 3 {
-			bridge = parts[2]
-		} else {
-			bridge = DEFAULT_BRIDGE
+		vm.wifiModem.UpdateScanResults(names...)
+	*/
+}
+
+func updateAccessPointsVisible() {
+	for _, vm := range vms.findVmsByType(Android) {
+		points := []miniwifi.APInfo{}
+		for _, ap := range wifiAPs {
+			signal := ap.signalStrength(vm.(*AndroidVM).lastLocation)
+			fmt.Printf("ap %v signal strength is %v\n", ap.ssid, signal)
+			if signal > -90 {
+				points = append(points, miniwifi.APInfo{SSID: ap.ssid, Power: ap.power})
+			} else if ap.mW == 0 {
+				// "universal" ap
+				points = append(points, miniwifi.APInfo{SSID: ap.ssid, Power: -44})
+			}
 		}
-		vlan, err := strconv.Atoi(parts[1])
-		if err != nil {
-			continue
-		}
-		vm.wifiNets[parts[0]] = wifiNet{ vlan, parts[0], bridge }
-		names = append(names, parts[0])
+		vm.(*AndroidVM).wifiModem.UpdateScanResults(points)
 	}
-	vm.wifiModem.UpdateScanResults(names...)
 }

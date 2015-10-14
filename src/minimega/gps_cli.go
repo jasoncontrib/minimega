@@ -93,5 +93,8 @@ func cliGPS(c *minicli.Command) *minicli.Response {
 		resp.Error = err.Error()
 	}
 
+	// TODO: is this the right place for this?
+	updateAccessPointsVisible()
+
 	return resp
 }
