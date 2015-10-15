@@ -507,7 +507,7 @@ func updateAccessPointsVisible() {
 		for _, ap := range wifiAPs {
 			signal := ap.signalStrength(vm.(*AndroidVM).currentLocation)
 			fmt.Printf("ap %v signal strength is %v\n", ap.ssid, signal)
-			if signal > -90 {
+			if signal > -70 {
 				points = append(points, miniwifi.APInfo{SSID: ap.ssid, Power: ap.power})
 			} else if ap.mW == 0 {
 				// "universal" ap
