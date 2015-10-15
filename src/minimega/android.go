@@ -68,30 +68,6 @@ func (ap *accessPoint) signalStrength(loc location) float64 {
 	return signal
 }
 
-type location struct {
-	lat      float64
-	long     float64
-	accuracy float64
-}
-
-// Returns a distance, in meters, between two locations
-func locationDistance(p1, p2 location) float64 {
-	R := 6371000.0 // metres
-	φ1 := p1.lat * math.Pi / 180
-	φ2 := p2.lat * math.Pi / 180
-	Δφ := (p2.lat - p1.lat) * math.Pi / 180
-	Δλ := (p2.long - p1.long) * math.Pi / 180
-
-	a := math.Sin(Δφ/2)*math.Sin(Δφ/2) +
-		math.Cos(φ1)*math.Cos(φ2)*
-			math.Sin(Δλ/2)*math.Sin(Δλ/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	d := R * c
-
-	return d
-}
-
 type AndroidVM struct {
 	KvmVM         // embed
 	AndroidConfig // embed
@@ -99,10 +75,15 @@ type AndroidVM struct {
 	Modem     *minimodem.Modem
 	wifiModem *miniwifi.Modem
 
-	gpsPath      string        // path to socket for communicating with vm
-	gpsConn      net.Conn      // connection to GPS socket
-	gpsWriter    *bufio.Writer // writer for GPS socket
-	lastLocation location      // the most recent location of this phone
+	gpsPath   string        // path to socket for communicating with vm
+	gpsConn   net.Conn      // connection to GPS socket
+	gpsWriter *bufio.Writer // writer for GPS socket
+
+	originLocation      location // the most recent manually-set location of this phone
+	currentLocation     location // the most recent location of this phone
+	destinationLocation location // wherever this VM is wandering to
+	moveSpeed           float64  // Actually a Δlat/long to reach approximate walk/drive speeds
+	// about 0.000007 for walking, 0.0004 for driving
 
 	Number int
 
@@ -131,6 +112,8 @@ func init() {
 	telephonyAllocs[vmConfig.NumberPrefix] = make(chan int)
 
 	wifiAPs = make(map[string]accessPoint)
+
+	go gpsMove()
 }
 
 // Copy makes a deep copy and returns reference to the new struct.
@@ -483,9 +466,12 @@ func (vm *AndroidVM) PushGPS(nmea string) error {
 	if err != nil {
 		return err
 	}
-	vm.lastLocation = location
+	vm.currentLocation = location
+	vm.originLocation = location
 	vm.gpsWriter.WriteString(nmea)
 	vm.gpsWriter.WriteString("\n")
+	// TODO: is this the right place for this?
+	updateAccessPointsVisible()
 	return vm.gpsWriter.Flush()
 }
 
@@ -519,7 +505,7 @@ func updateAccessPointsVisible() {
 	for _, vm := range vms.findVmsByType(Android) {
 		points := []miniwifi.APInfo{}
 		for _, ap := range wifiAPs {
-			signal := ap.signalStrength(vm.(*AndroidVM).lastLocation)
+			signal := ap.signalStrength(vm.(*AndroidVM).currentLocation)
 			fmt.Printf("ap %v signal strength is %v\n", ap.ssid, signal)
 			if signal > -90 {
 				points = append(points, miniwifi.APInfo{SSID: ap.ssid, Power: ap.power})
