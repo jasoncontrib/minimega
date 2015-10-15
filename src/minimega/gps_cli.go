@@ -147,7 +147,7 @@ func cliGPSWander(c *minicli.Command) *minicli.Response {
 		vm.moveSpeed = 0.000007
 	} else if c.BoolArgs["driving"] {
 		// Set the speed to a driving pace
-		vm.moveSpeed = 0.0004
+		vm.moveSpeed = 0.0001
 	}
 
 	return resp
@@ -167,9 +167,9 @@ func gpsMove() {
 				// If so, pick a new destinationLocation within ~15km of the origin
 				// TODO: make the radius more intelligent
 				// 1. Choose a random Δlat & Δlong of up to 0.1
-				// TODO: CHANTGED 0.1 TO 0.001 FOR DEBUGGING
-				Δlat := rand.Float64() * 0.001
-				Δlong := rand.Float64() * 0.001
+				// TODO: CHANTGED 0.1 TO 0.01 FOR DEBUGGING
+				Δlat := rand.Float64() * 0.01
+				Δlong := rand.Float64() * 0.01
 
 				// 2. Half the time, the Δ should be negative
 				if rand.Float64() < 0.5 {
@@ -187,7 +187,7 @@ func gpsMove() {
 			// Move toward the destination point
 			// Calculate Δlat and Δlong
 			var Δlat, Δlong float64
-			if diff := math.Abs(a.destinationLocation.lat - a.currentLocation.lat); diff < a.moveSpeed {
+			if diff := a.destinationLocation.lat - a.currentLocation.lat; math.Abs(diff) < a.moveSpeed {
 				Δlat = diff
 			} else {
 				Δlat = a.moveSpeed
@@ -209,6 +209,7 @@ func gpsMove() {
 			a.currentLocation.long += Δlong
 			log.Info("VM %v moved to point %v", a.GetName(), a.currentLocation)
 		}
+		updateAccessPointsVisible()
 		time.Sleep(1 * time.Second)
 	}
 }
