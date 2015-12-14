@@ -157,6 +157,9 @@ func gpsMove() {
 	for {
 		for _, vm := range vms.findVmsByType(Android) {
 			a := vm.(*AndroidVM)
+			if a.GetState() != VM_RUNNING {
+				continue
+			}
 			if a.moveSpeed == 0.0 {
 				// this one isn't moving
 				continue

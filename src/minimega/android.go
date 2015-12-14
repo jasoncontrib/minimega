@@ -503,6 +503,9 @@ func (vm *AndroidVM) SetWifiSSIDs(ssids ...string) {
 
 func updateAccessPointsVisible() {
 	for _, vm := range vms.findVmsByType(Android) {
+		if vm.GetState() != VM_RUNNING {
+			continue
+		}
 		points := []miniwifi.APInfo{}
 		for _, ap := range wifiAPs {
 			signal := ap.signalStrength(vm.(*AndroidVM).currentLocation)
