@@ -31,6 +31,8 @@ const (
 type Server struct {
 	serialConns        map[string]net.Conn // map of connected, but not necessarily active serial connections
 	serialLock         sync.Mutex
+	udsConns           map[string]net.Listener
+	udsLock            sync.Mutex
 	commands           map[int]*Command // map of active commands
 	commandLock        sync.Mutex
 	commandCounter     int
@@ -62,6 +64,8 @@ type Client struct {
 	IP       []string
 	MAC      []string
 
+	Version string
+
 	Responses     []*Response   // response queue, consumed and cleared by the heartbeat
 	Commands      chan *Command // ordered list of commands to be processed by the client
 	responseLock  sync.Mutex
@@ -86,6 +90,7 @@ type Message struct {
 func NewServer(port int, path string) (*Server, error) {
 	s := &Server{
 		serialConns:   make(map[string]net.Conn),
+		udsConns:      make(map[string]net.Listener),
 		commands:      make(map[int]*Command),
 		clients:       make(map[string]*Client),
 		path:          path,
@@ -105,7 +110,7 @@ func NewServer(port int, path string) (*Server, error) {
 
 // NewClient attempts to connect to a ron server over tcp, or serial if the
 // serial argument is supplied.
-func NewClient(port int, parent, serial, path string) (*Client, error) {
+func NewClient(family string, port int, parent, serial, path string) (*Client, error) {
 	uuid, err := getUUID()
 	if err != nil {
 		return nil, err
@@ -125,7 +130,7 @@ func NewClient(port int, parent, serial, path string) (*Client, error) {
 	if serial != "" {
 		err = c.dialSerial(serial)
 	} else {
-		c.dial(parent, port)
+		c.dial(family, parent, port)
 	}
 	if err != nil {
 		return nil, err

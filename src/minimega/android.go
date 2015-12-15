@@ -57,14 +57,12 @@ func (ap *accessPoint) signalStrength(loc location) float64 {
 	if d == 0 {
 		d = 0.01
 	}
-	fmt.Printf("signalStrength: distance = %v meters\n", d)
 
 	// Calculate Free-Space Path Loss
 	// 27.55 is the constant for meters & megahertz
 	fspl := 20*math.Log10(d) + 20*math.Log10(f) - 27.55
 
 	signal := float64(ap.power) - fspl
-	fmt.Printf("signalStrength: fspl = %v, signal = %v\n", fspl, signal)
 	return signal
 }
 
@@ -509,7 +507,6 @@ func updateAccessPointsVisible() {
 		points := []miniwifi.APInfo{}
 		for _, ap := range wifiAPs {
 			signal := ap.signalStrength(vm.(*AndroidVM).currentLocation)
-			fmt.Printf("ap %v signal strength is %v\n", ap.ssid, signal)
 			if signal > -70 {
 				points = append(points, miniwifi.APInfo{SSID: ap.ssid, Power: ap.power})
 			} else if ap.mW == 0 {

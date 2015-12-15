@@ -10,7 +10,15 @@ import (
 	"meshage"
 	"minicli"
 	log "minilog"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	IOM_HELPER_WAIT  = time.Duration(100 * time.Millisecond)
+	IOM_HELPER_MATCH = "file:"
 )
 
 var (
@@ -62,10 +70,6 @@ You can also supply globs (wildcards) with the * operator. For example:
 		},
 		Call: wrapSimpleCLI(cliFile),
 	},
-}
-
-func init() {
-	registerHandlers("io", ioCLIHandlers)
 }
 
 func iomeshageInit(node *meshage.Node) {
@@ -123,4 +127,154 @@ func cliFile(c *minicli.Command) *minicli.Response {
 	}
 
 	return resp
+}
+
+// walk every arg looking for "file:" and calling iomHelper on the suffix.
+// Replace the arg with the local file if found.
+func iomPreprocessor(c *minicli.Command) (*minicli.Command, error) {
+	for k, v := range c.StringArgs {
+		if strings.HasPrefix(v, IOM_HELPER_MATCH) {
+			file := strings.TrimPrefix(v, IOM_HELPER_MATCH)
+			local, err := iomHelper(file)
+			if err != nil {
+				return nil, err
+			}
+			log.Debug("iomPreProcessor: %v -> %v", v, local)
+			c.StringArgs[k] = local
+		}
+	}
+	for k, v := range c.ListArgs {
+		for x, y := range v {
+			if strings.HasPrefix(y, IOM_HELPER_MATCH) {
+				file := strings.TrimPrefix(y, IOM_HELPER_MATCH)
+				local, err := iomHelper(file)
+				if err != nil {
+					return nil, err
+				}
+				log.Debug("iomPreProcessor: %v -> %v", y, local)
+				c.ListArgs[k][x] = local
+			}
+		}
+	}
+	return c, nil
+}
+
+// iomHelper supports grabbing files for internal minimega operations. It
+// returns the local path of the file or an error if the file doesn't exist or
+// could not transfer. iomHelper blocks until all file transfers are completed.
+func iomHelper(file string) (string, error) {
+	err := iom.Get(file)
+	if err != nil {
+		return "", err
+	}
+
+	// poll until the file transfer is completed
+	for {
+		var waiting bool
+		transfers := iom.Status()
+		for _, f := range transfers {
+			if strings.Contains(f.Filename, file) {
+				log.Debug("iomHelper waiting on %v: %v/%v", f.Filename, len(f.Parts), f.NumParts)
+				waiting = true
+			}
+		}
+		if !waiting {
+			break
+		}
+		time.Sleep(IOM_HELPER_WAIT)
+	}
+
+	dst := filepath.Join(*f_iomBase, file)
+	return dst, nil
+}
+
+// a filename completer for goreadline that searches for the file: prefix,
+// attempts to find matching files, and returns an array of candidates.
+func iomCompleter(line string) []string {
+	f := strings.Fields(line)
+	if len(f) == 0 {
+		return nil
+	}
+	last := f[len(f)-1]
+	if strings.HasPrefix(last, IOM_HELPER_MATCH) {
+		fileprefix := strings.TrimPrefix(last, IOM_HELPER_MATCH)
+		matches := iom.Info(fileprefix + "*")
+		log.Debug("got raw matches: %v", matches)
+
+		// we need to clean up matches to collapse directories, unless
+		// there is a directory common prefix, in which case we
+		// collapse offset by the number of common directories.
+		dlcp := lcp(matches)
+		didx := strings.LastIndex(dlcp, string(filepath.Separator))
+		drel := ""
+		if didx > 0 {
+			drel = dlcp[:didx]
+		}
+		log.Debug("dlcp: %v, drel: %v", dlcp, drel)
+
+		if len(fileprefix) < len(drel) {
+			r := IOM_HELPER_MATCH + drel + string(filepath.Separator)
+			return []string{r, r + "0"} // hack to prevent readline from fastforwarding beyond the directory name
+		}
+
+		var finalMatches []string
+		for _, v := range matches {
+			if strings.Contains(v, "*") {
+				continue
+			}
+			r, err := filepath.Rel(drel, v)
+			if err != nil {
+				log.Errorln(err)
+				return nil
+			}
+			dir := filepath.Dir(r)
+			if dir == "." {
+				finalMatches = append(finalMatches, IOM_HELPER_MATCH+v)
+				continue
+			}
+
+			paths := strings.Split(dir, string(filepath.Separator))
+			found := false
+			for _, d := range finalMatches {
+				if d == paths[0]+string(filepath.Separator) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				finalMatches = append(finalMatches, IOM_HELPER_MATCH+filepath.Join(drel, paths[0])+string(filepath.Separator))
+			}
+		}
+
+		return finalMatches
+	}
+	return nil
+}
+
+// a simple longest common prefix function
+func lcp(s []string) string {
+	var lcp string
+	var p int
+
+	if len(s) == 0 {
+		return ""
+	}
+
+	for {
+		var c byte
+		for _, v := range s {
+			if len(v) <= p {
+				return lcp
+			}
+			if c == 0 {
+				c = v[p]
+				continue
+			}
+			if c != v[p] {
+				return lcp
+			}
+		}
+		lcp += string(s[0][p])
+		p++
+	}
 }

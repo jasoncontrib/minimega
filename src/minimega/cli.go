@@ -37,13 +37,62 @@ var (
 	cmdLock sync.Mutex
 )
 
+// cliSetup registers all the minimega handlers
+func cliSetup() {
+	registerHandlers("bridge", bridgeCLIHandlers)
+	registerHandlers("capture", captureCLIHandlers)
+	registerHandlers("cc", ccCLIHandlers)
+	registerHandlers("deploy", deployCLIHandlers)
+	registerHandlers("disk", diskCLIHandlers)
+	registerHandlers("dnsmasq", dnsmasqCLIHandlers)
+	registerHandlers("dot", dotCLIHandlers)
+	registerHandlers("external", externalCLIHandlers)
+	registerHandlers("history", historyCLIHandlers)
+	registerHandlers("host", hostCLIHandlers)
+	registerHandlers("io", ioCLIHandlers)
+	registerHandlers("log", logCLIHandlers)
+	registerHandlers("meshage", meshageCLIHandlers)
+	registerHandlers("misc", miscCLIHandlers)
+	registerHandlers("nuke", nukeCLIHandlers)
+	registerHandlers("optimize", optimizeCLIHandlers)
+	registerHandlers("shell", shellCLIHandlers)
+	registerHandlers("vm", vmCLIHandlers)
+	registerHandlers("vnc", vncCLIHandlers)
+	registerHandlers("vyatta", vyattaCLIHandlers)
+	registerHandlers("web", webCLIHandlers)
+}
+
 // Wrapper for minicli.ProcessCommand. Ensures that the command execution lock
 // is acquired before running the command.
 func runCommand(cmd *minicli.Command) chan minicli.Responses {
 	cmdLock.Lock()
-	defer cmdLock.Unlock()
 
-	return minicli.ProcessCommand(cmd)
+	// Forward the responses and unlock when all are passed through
+	localChan := make(chan minicli.Responses)
+	go func() {
+		defer cmdLock.Unlock()
+
+		cmd, err := cliPreprocessor(cmd)
+		if err != nil {
+			log.Errorln(err)
+			localChan <- minicli.Responses{
+				&minicli.Response{
+					Host:  hostname,
+					Error: err.Error(),
+				},
+			}
+			close(localChan)
+			return
+		}
+
+		for resp := range minicli.ProcessCommand(cmd) {
+			localChan <- resp
+		}
+
+		close(localChan)
+	}()
+
+	return localChan
 }
 
 // Wrapper for minicli.ProcessCommand for commands that use meshage.
@@ -64,11 +113,23 @@ func runCommandGlobally(cmd *minicli.Command) chan minicli.Responses {
 	cmd.Record = record
 
 	cmdLock.Lock()
-	defer cmdLock.Unlock()
 
 	var wg sync.WaitGroup
 
 	out := make(chan minicli.Responses)
+
+	cmd, err = cliPreprocessor(cmd)
+	if err != nil {
+		log.Errorln(err)
+		out <- minicli.Responses{
+			&minicli.Response{
+				Host:  hostname,
+				Error: err.Error(),
+			},
+		}
+		close(out)
+		return out
+	}
 
 	// Run the command (should be `mesh send all ...` and the subcommand which
 	// should run locally).
@@ -88,10 +149,13 @@ func runCommandGlobally(cmd *minicli.Command) chan minicli.Responses {
 		}(in)
 	}
 
-	// Wait until everything has been read before closing out
+	// Wait until everything has been read before closing the chan and
+	// releasing the lock.
 	go func() {
+		defer cmdLock.Unlock()
+		defer close(out)
+
 		wg.Wait()
-		close(out)
 	}()
 
 	return out
@@ -99,6 +163,8 @@ func runCommandGlobally(cmd *minicli.Command) chan minicli.Responses {
 
 // local command line interface, wrapping readline
 func cliLocal() {
+	goreadline.FilenameCompleter = iomCompleter
+
 	prompt := "minimega$ "
 
 	for {
@@ -137,4 +203,10 @@ func cliLocal() {
 			}
 		}
 	}
+}
+
+// cliPreprocessor allows modifying commands post-compile but pre-process.
+// Currently the only preprocessor is the "file:" handler.
+func cliPreprocessor(c *minicli.Command) (*minicli.Command, error) {
+	return iomPreprocessor(c)
 }

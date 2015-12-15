@@ -6,12 +6,10 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"io/ioutil"
 	"minicli"
 	log "minilog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -32,10 +30,6 @@ Should be run with caution.`,
 	},
 }
 
-func init() {
-	registerHandlers("nuke", nukeCLIHandlers)
-}
-
 // clean up after an especially bad crash, hopefully we don't have to call
 // this one much :)
 // currently this will:
@@ -43,12 +37,22 @@ func init() {
 //	kill all taps
 //	remove everything inside of info.BasePath (careful, that's dangerous)
 func cliNuke(c *minicli.Command) *minicli.Response {
+	// nuke any container related items
+	containerNuke()
+
 	// walk the minimega root tree and do certain actions such as
 	// kill qemu pids, remove taps, and remove the bridge
 	err := filepath.Walk(*f_base, nukeWalker)
 	if err != nil {
 		log.Errorln(err)
 	}
+
+	// force bridge info to update (and make sure that at least the default
+	// bridge tracked by minimega).
+	getBridge(DEFAULT_BRIDGE)
+	bridgeLock.Lock()
+	updateBridgeInfo()
+	bridgeLock.Unlock()
 
 	// remove all mega_taps
 	bNames := nukeBridgeNames(true)
@@ -83,7 +87,7 @@ func cliNuke(c *minicli.Command) *minicli.Response {
 // bridges that existed before minimega was launched
 func nukeBridgeNames(preExist bool) []string {
 	var ret []string
-	b, err := os.Open(*f_base + "bridges")
+	b, err := os.Open(filepath.Join(*f_base, "bridges"))
 	if err != nil {
 		log.Errorln(err)
 		return nil
@@ -94,10 +98,10 @@ func nukeBridgeNames(preExist bool) []string {
 	for scanner.Scan() {
 		f := strings.Fields(scanner.Text())
 		log.Debugln(f)
-		if len(f) <= 3 {
+		if len(f) <= 2 {
 			continue
 		}
-		if (f[2] == "true" && preExist) || f[2] == "false" {
+		if (f[1] == "true" && preExist) || f[1] == "false" {
 			ret = append(ret, f[0])
 		}
 	}
@@ -108,27 +112,8 @@ func nukeBridgeNames(preExist bool) []string {
 func nukeBridges() {
 	bNames := nukeBridgeNames(false)
 	for _, b := range bNames {
-		var sOut bytes.Buffer
-		var sErr bytes.Buffer
-
-		p := process("ovs")
-		cmd := &exec.Cmd{
-			Path: p,
-			Args: []string{
-				p,
-				"del-br",
-				b,
-			},
-			Env:    nil,
-			Dir:    "",
-			Stdout: &sOut,
-			Stderr: &sErr,
-		}
-		log.Infoln("removing bridge:", b)
-		//err := cmd.Run()
-		err := cmdTimeout(cmd, OVS_TIMEOUT)
-		if err != nil {
-			log.Error("%v: %v", err, sErr.String())
+		if err := ovsDelBridge(b); err != nil {
+			log.Error("%v -- %v", b, err)
 		}
 	}
 }
@@ -148,93 +133,27 @@ func nukeWalker(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		var sOut bytes.Buffer
-		var sErr bytes.Buffer
 
-		p := process("kill")
-		cmd := &exec.Cmd{
-			Path: p,
-			Args: []string{
-				p,
-				t,
-			},
-			Env:    nil,
-			Dir:    "",
-			Stdout: &sOut,
-			Stderr: &sErr,
+		args := []string{
+			"kill",
+			t,
 		}
 		log.Infoln("killing process:", t)
-		err = cmd.Run()
+
+		out, err := processWrapper(args...)
 		if err != nil {
-			log.Error("%v: %v", err, sErr.String())
+			log.Error("%v: %v", err, out)
 		}
 	}
 	return nil
 }
 
 func nukeTap(b, tap string) {
-	var sOut bytes.Buffer
-	var sErr bytes.Buffer
-
-	p := process("ip")
-	cmd := &exec.Cmd{
-		Path: p,
-		Args: []string{
-			p,
-			"link",
-			"set",
-			tap,
-			"down",
-		},
-		Env:    nil,
-		Dir:    "",
-		Stdout: &sOut,
-		Stderr: &sErr,
-	}
-	log.Info("bringing tap down with cmd: %v", cmd)
-	err := cmd.Run()
-	if err != nil {
-		log.Error("%v: %v", err, sErr.String())
+	if err := ovsDelPort(b, tap); err != nil && err != ErrNoSuchPort {
+		log.Error("%v, %v -- %v", b, tap, err)
 	}
 
-	cmd = &exec.Cmd{
-		Path: p,
-		Args: []string{
-			p,
-			"tuntap",
-			"del",
-			"mode",
-			"tap",
-			tap,
-		},
-		Env:    nil,
-		Dir:    "",
-		Stdout: &sOut,
-		Stderr: &sErr,
-	}
-	log.Info("destroying tap with cmd: %v", cmd)
-	err = cmd.Run()
-	if err != nil {
-		log.Error("%v: %v", err, sErr.String())
-	}
-
-	p = process("ovs")
-	cmd = &exec.Cmd{
-		Path: p,
-		Args: []string{
-			p,
-			"del-port",
-			b,
-			tap,
-		},
-		Env:    nil,
-		Dir:    "",
-		Stdout: &sOut,
-		Stderr: &sErr,
-	}
-	log.Info("removing tap from mega_bridge with cmd: %v", cmd)
-	err = cmd.Run()
-	if err != nil {
-		log.Error("%v: %v", err, sErr.String())
+	if err := delTap(tap); err != nil {
+		log.Error("%v -- %v", tap, err)
 	}
 }

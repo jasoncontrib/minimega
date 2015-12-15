@@ -68,11 +68,6 @@ NOTE: If you start the webserver with an invalid root, you can safely re-run
 	},
 }
 
-func init() {
-	registerHandlers("web", webCLIHandlers)
-
-}
-
 func cliWeb(c *minicli.Command) *minicli.Response {
 	resp := &minicli.Response{Host: hostname}
 
@@ -167,6 +162,8 @@ func webScreenshot(w http.ResponseWriter, r *http.Request) {
 		for _, resp := range resps {
 			if resp.Error != "" {
 				if strings.HasPrefix(resp.Error, "vm not running:") {
+					continue
+				} else if strings.HasPrefix(resp.Error, "vm does not support screenshots") {
 					continue
 				}
 

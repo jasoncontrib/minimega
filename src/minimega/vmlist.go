@@ -81,6 +81,9 @@ func (vms VMs) save(file *os.File, args []string) error {
 		case *KvmVM:
 			cmds = append(cmds, "vm config kvm true")
 			cmds = append(cmds, saveConfig("kvm", kvmConfigFns, &vm.KVMConfig)...)
+		case *ContainerVM:
+			cmds = append(cmds, "vm config container true")
+			cmds = append(cmds, saveConfig("container", containerConfigFns, &vm.ContainerConfig)...)
 		default:
 		}
 
@@ -125,7 +128,11 @@ func (vms VMs) screenshot(idOrName, path string, max int) ([]byte, error) {
 		return nil, vmNotFound(idOrName)
 	}
 
-	return vm.Screenshot(max)
+	if vm, ok := vm.(*KvmVM); ok {
+		return vm.Screenshot(max)
+	}
+
+	return nil, vmNotPhotogenic(idOrName)
 }
 
 func (vms VMs) migrate(idOrName, filename string) error {
@@ -187,6 +194,8 @@ func (vms VMs) launch(name string, vmType VMType, ack chan int) error {
 		vm = NewKVM(name)
 	case Android:
 		vm = NewAndroid(name)
+	case CONTAINER:
+		vm = NewContainer(name)
 	default:
 		// TODO
 	}
@@ -264,33 +273,31 @@ func (vms VMs) flush() {
 	for i, vm := range vms {
 		if vm.GetState()&(VM_QUIT|VM_ERROR) != 0 {
 			log.Infoln("deleting VM: ", i)
+
+			vm.Flush()
+
 			delete(vms, i)
 		}
 	}
 }
 
-func (vms VMs) info(vmType string) ([]string, [][]string, error) {
+func (vms VMs) info() ([]string, [][]string, error) {
 	table := make([][]string, 0, len(vms))
 
 	masks := vmMasks
-	if vmType == "kvm" {
-		masks = kvmMasks
-	} else if vmType == "android" {
+/*
+	if vmType == "android" {
 		masks = androidMasks
 	}
+*/
 
-vmLoop:
 	for _, vm := range vms {
-		if vm.GetType().String() != vmType && vmType != "" {
-			continue
-		}
-
 		row := []string{}
 
 		for _, mask := range masks {
 			if v, err := vm.Info(mask); err != nil {
-				log.Error("bad mask for %v -- %v", vm.GetID(), err)
-				continue vmLoop
+				// Field not set for VM type, replace with placeholder
+				row = append(row, "N/A")
 			} else {
 				row = append(row, v)
 			}
@@ -306,14 +313,11 @@ vmLoop:
 func (vms VMs) cleanDirs() {
 	log.Debugln("cleanDirs")
 	for _, vm := range vms {
-		if vm, ok := vm.(*KvmVM); ok {
-			log.Debug("cleaning instance path: %v", vm.instancePath)
-			err := os.RemoveAll(vm.instancePath)
-			if err != nil {
-				log.Error("clearDirs: %v", err)
-			}
-		} else {
-			// TODO
+		path := vm.GetInstancePath()
+		log.Debug("cleaning instance path: %v", path)
+		err := os.RemoveAll(path)
+		if err != nil {
+			log.Error("clearDirs: %v", err)
 		}
 	}
 }

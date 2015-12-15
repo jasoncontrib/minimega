@@ -27,32 +27,37 @@ can be used to subselect a set of rows and/or columns. See the help pages for
 .filter and .columns, respectively, for their usage. Columns returned by VM
 info include:
 
-- host      : the host that the VM is running on
-- id        : the VM ID, as an integer
-- name      : the VM name, if it exists
-- state     : one of (building, running, paused, quit, error)
-- type      : one of (kvm)
-- vcpus     : the number of allocated CPUs
-- memory    : allocated memory, in megabytes
-- vlan      : vlan, as an integer
-- bridge    : bridge name
-- tap       : tap name
-- mac       : mac address
-- ip        : IPv4 address
-- ip6       : IPv6 address
-- bandwidth : stats regarding bandwidth usage
-- tags      : any additional information attached to the VM
+- host       : the host that the VM is running on
+- id         : the VM ID, as an integer
+- name       : the VM name, if it exists
+- state      : one of (building, running, paused, quit, error)
+- type       : one of (kvm)
+- vcpus      : the number of allocated CPUs
+- memory     : allocated memory, in megabytes
+- vlan       : vlan, as an integer
+- bridge     : bridge name
+- tap        : tap name
+- mac        : mac address
+- ip         : IPv4 address
+- ip6        : IPv6 address
+- bandwidth  : stats regarding bandwidth usage
+- tags       : any additional information attached to the VM
+- uuid       : QEMU system uuid
+- cc_active  : whether cc is active
 
 Additional fields are available for KVM-based VMs:
 
-- append    : kernel command line string
-- cdrom     : cdrom image
-- disk      : disk image
-- kernel    : kernel image
-- initrd    : initrd image
-- migrate   : qemu migration image
-- uuid      : QEMU system uuid
-- cc_active : whether cc is active
+- append     : kernel command line string
+- cdrom      : cdrom image
+- disk       : disk image
+- kernel     : kernel image
+- initrd     : initrd image
+- migrate    : qemu migration image
+
+Additional fields are available for container-based VMs:
+
+- init	     : process to invoke as init
+- filesystem : root filesystem for the container
 
 Additional fields are available for Android-based VMs:
 
@@ -65,15 +70,13 @@ Examples:
 Display a list of all IPs for all VMs:
 	.columns ip,ip6 vm info
 
-Display all information about KVM-based VMs with the disk image foo.qc2:
-	.filter disk=foo.qc2 vm info kvm
-
 Display information about all VMs:
 	vm info`,
 		Patterns: []string{
 			"vm info",
 			"vm info <kvm,>",
 			"vm info <android,>",
+			"vm info <container,>",
 		},
 		Call: wrapSimpleCLI(cliVmInfo),
 	},
@@ -114,8 +117,7 @@ The optional 'noblock' suffix forces minimega to return control of the command
 line immediately instead of waiting on potential errors from launching the
 VM(s). The user must check logs or error states from vm info.`, Wildcard),
 		Patterns: []string{
-			"vm launch <kvm,> <name or count> [noblock,]",
-			"vm launch <android,> <name or count> [noblock,]",
+			"vm launch <kvm,android,container> <name or count> [noblock,]",
 		},
 		Call: wrapSimpleCLI(cliVmLaunch),
 	},
@@ -749,6 +751,58 @@ Note: this configuration only applies to Android-based VMs.`,
 			return cliVmConfigField(c, "telephony")
 		}),
 	},
+	{ // vm config hostname
+		HelpShort: "set a hostname for containers",
+		HelpLong: `
+Set a hostname for a container before launching the init program. If not set,
+the hostname will be that of the physical host. The hostname can also be set by
+the init program or other root process in the container.`,
+		Patterns: []string{
+			"vm config hostname [hostname]",
+		},
+		Call: wrapSimpleCLI(func(c *minicli.Command) *minicli.Response {
+			return cliVmConfigField(c, "hostname")
+		}),
+	},
+	{ // vm config init
+		HelpShort: "container init program and args",
+		HelpLong: `
+Set the init program and args to exec into upon container launch. This will be
+PID 1 in the container.`,
+		Patterns: []string{
+			"vm config init [init]...",
+		},
+		Call: wrapSimpleCLI(func(c *minicli.Command) *minicli.Response {
+			return cliVmConfigField(c, "init")
+		}),
+	},
+	{ // vm config filesystem
+		HelpShort: "set the filesystem for containers",
+		HelpLong: `
+Set the filesystem to use for launching a container. This should be a root
+filesystem for a linux distribution (containing /dev, /proc, /sys, etc.)`,
+		Patterns: []string{
+			"vm config filesystem [filesystem]",
+		},
+		Call: wrapSimpleCLI(func(c *minicli.Command) *minicli.Response {
+			return cliVmConfigField(c, "filesystem")
+		}),
+	},
+	{ // vm config fifo
+		HelpShort: "set the number of fifos for containers",
+		HelpLong: `
+Set the number of named pipes to include in the container for container-host
+communication. Named pipes will appear on the host in the instance directory
+for the container as fifoN, and on the container as /dev/fifos/fifoN.
+
+Fifos are created using mkfifo() and have all of the same usage constraints.`,
+		Patterns: []string{
+			"vm config fifo [number]",
+		},
+		Call: wrapSimpleCLI(func(c *minicli.Command) *minicli.Response {
+			return cliVmConfigField(c, "fifo")
+		}),
+	},
 	{ // clear vm config
 		HelpShort: "reset vm config to the default value",
 		HelpLong: `
@@ -783,6 +837,10 @@ to the default value.`,
 			"clear vm config <virtio-serial,>",
 			// AndroidConfig
 			"clear vm config <telephony,>",
+			// ContainerConfig
+			"clear vm config <hostname,>",
+			"clear vm config <filesystem,>",
+			"clear vm config <init,>",
 		},
 		Call: wrapSimpleCLI(cliClearVmConfig),
 	},
@@ -815,35 +873,32 @@ Clear all tags from all VMs:
 }
 
 func init() {
-	registerHandlers("vm", vmCLIHandlers)
-
 	// Register these so we can serialize the VMs
 	gob.Register(VMs{})
 	gob.Register(&KvmVM{})
+	gob.Register(&ContainerVM{})
 }
 
 func cliVmInfo(c *minicli.Command) *minicli.Response {
 	var err error
 	resp := &minicli.Response{Host: hostname}
 
+/*
 	vmType := ""
 	if c.BoolArgs["kvm"] {
 		vmType = "kvm"
 	} else if c.BoolArgs["android"] {
 		vmType = "android"
 	}
+*/
 
 	for _, vm := range vms {
 		// Populate the latest bandwidth stats for all VMs
 		vm.UpdateBW()
-
-		// Populate CC Active flag for KVM vms
-		if vm, ok := vm.(*KvmVM); ok {
-			vm.UpdateCCActive()
-		}
+		vm.UpdateCCActive()
 	}
 
-	resp.Header, resp.Tabular, err = vms.info(vmType)
+	resp.Header, resp.Tabular, err = vms.info()
 	if err != nil {
 		resp.Error = err.Error()
 		return resp
@@ -1037,6 +1092,8 @@ func cliVmConfig(c *minicli.Command) *minicli.Response {
 				vmConfig.KVMConfig = *vm.KVMConfig.Copy()
 			case *AndroidVM:
 				vmConfig.AndroidConfig = *vm.AndroidConfig.Copy()
+			case *ContainerVM:
+				vmConfig.ContainerConfig = *vm.ContainerConfig.Copy()
 			}
 		}
 	} else {
@@ -1064,8 +1121,10 @@ func cliVmConfigField(c *minicli.Command, field string) *minicli.Response {
 		config = &vmConfig.KVMConfig
 	} else if fns, ok = androidConfigFns[field]; ok {
 		config = &vmConfig.AndroidConfig
+	} else if fns, ok = containerConfigFns[field]; ok {
+		config = &vmConfig.ContainerConfig
 	} else {
-		log.Fatalln("unknown config field: `%s`", field)
+		log.Fatal("unknown config field: `%s`", field)
 	}
 
 	if nArgs == 0 {
@@ -1083,6 +1142,9 @@ func cliClearVmConfig(c *minicli.Command) *minicli.Response {
 	resp := &minicli.Response{Host: hostname}
 
 	var clearAll = len(c.BoolArgs) == 0
+	var clearKVM = clearAll || (len(c.BoolArgs) == 1 && c.BoolArgs["kvm"])
+	var clearAndroid = clearAll || (len(c.BoolArgs) == 1 && c.BoolArgs["android"])
+	var clearContainer = clearAll || (len(c.BoolArgs) == 1 && c.BoolArgs["container"])
 	var cleared bool
 
 	for k, fns := range baseConfigFns {
@@ -1092,14 +1154,19 @@ func cliClearVmConfig(c *minicli.Command) *minicli.Response {
 		}
 	}
 	for k, fns := range kvmConfigFns {
-		if clearAll || c.BoolArgs[k] {
+		if clearKVM || c.BoolArgs[k] {
 			fns.Clear(&vmConfig.KVMConfig)
 			cleared = true
 		}
 	}
 	for k, fns := range androidConfigFns {
-		if clearAll || c.BoolArgs[k] {
+		if clearAndroid || c.BoolArgs[k] {
 			fns.Clear(&vmConfig.AndroidConfig)
+		}
+	}
+	for k, fns := range containerConfigFns {
+		if clearContainer || c.BoolArgs[k] {
+			fns.Clear(&vmConfig.ContainerConfig)
 			cleared = true
 		}
 	}
@@ -1166,7 +1233,7 @@ func cliVmLaunch(c *minicli.Command) *minicli.Response {
 		var err error
 		vmType, err = ParseVMType(k)
 		if err != nil {
-			log.Fatalln("expected VM type, not `%v`", k)
+			log.Fatal("expected VM type, not `%v`", k)
 		}
 	}
 

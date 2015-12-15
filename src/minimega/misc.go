@@ -15,6 +15,7 @@ import (
 	"math/rand"
 	"minicli"
 	log "minilog"
+	"net"
 	"os/exec"
 	"regexp"
 	"resize"
@@ -72,6 +73,16 @@ func isMac(mac string) bool {
 		return false
 	}
 	return match
+}
+
+func allocatedMac(mac string) bool {
+	hw, err := net.ParseMAC(mac)
+	if err != nil {
+		return false
+	}
+
+	_, allocated := macs.ValidMACPrefixMap[[3]byte{hw[0], hw[1], hw[2]}]
+	return allocated
 }
 
 func hostid(s string) (string, int) {
@@ -162,6 +173,8 @@ func unescapeString(input []string) string {
 // after time t. If a timeout occurs, cmdTimeout will kill the process.
 func cmdTimeout(c *exec.Cmd, t time.Duration) error {
 	log.Debug("cmdTimeout: %v", c)
+
+	start := time.Now()
 	err := c.Start()
 	if err != nil {
 		return fmt.Errorf("cmd start: %v", err)
@@ -180,6 +193,7 @@ func cmdTimeout(c *exec.Cmd, t time.Duration) error {
 		}
 		return <-done
 	case err = <-done:
+		log.Debug("cmd %v completed in %v", c, time.Now().Sub(start))
 		return err
 	}
 }
@@ -206,7 +220,7 @@ func findRemoteVM(host, vm string) (int, string, error) {
 		if err == nil {
 			cmdStr = fmt.Sprintf(".filter id=%v .columns name,id .record false vm info", v)
 		} else {
-			cmdStr = fmt.Sprintf(".filter name=%v .columns name,id .record false vm info", v)
+			cmdStr = fmt.Sprintf(".filter name=%v .columns name,id .record false vm info", vm)
 		}
 
 		cmd := minicli.MustCompile(cmdStr)

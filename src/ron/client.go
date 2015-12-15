@@ -15,13 +15,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"version"
 )
 
 const RETRY_TIMEOUT = 10
 
-// dial over tcp to a ron server
-func (c *Client) dial(parent string, port int) {
-	log.Debug("ron dial: %v:%v", parent, port)
+// dial to a ron server
+func (c *Client) dial(family string, parent string, port int) {
+	log.Debug("ron dial: %v:%v:%v", family, parent, port)
 
 	go c.mux()
 	go c.periodic()
@@ -31,7 +32,16 @@ func (c *Client) dial(parent string, port int) {
 		retry := time.Duration(RETRY_TIMEOUT * time.Second)
 		c.hold.Lock()
 		for {
-			conn, err := net.Dial("tcp", fmt.Sprintf("%v:%v", parent, port))
+			var addr string
+			switch family {
+			case "tcp":
+				addr = fmt.Sprintf("%v:%v", parent, port)
+			case "unix":
+				addr = parent
+			default:
+				log.Fatal("invalid ron dial network family: %v", family)
+			}
+			conn, err := net.Dial(family, addr)
 			if err != nil {
 				log.Errorln(err)
 			} else {
@@ -140,6 +150,7 @@ func (c *Client) heartbeat() {
 		OS:             runtime.GOOS,
 		Hostname:       hostname,
 		CommandCounter: c.CommandCounter,
+		Version:        version.Revision,
 	}
 
 	macs, ips := getNetworkInfo()

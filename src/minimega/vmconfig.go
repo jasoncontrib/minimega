@@ -43,6 +43,14 @@ func mustAndroidConfig(val interface{}) *AndroidConfig {
 	return nil
 }
 
+func mustContainerConfig(val interface{}) *ContainerConfig {
+	if val, ok := val.(*ContainerConfig); ok {
+		return val
+	}
+	log.Fatal("`%#v` is not a ContainerConfig", val)
+	return nil
+}
+
 // Functions for configuring VMs.
 var baseConfigFns = map[string]VMConfigFns{
 	"memory": vmConfigString(func(vm interface{}) *string {
@@ -88,6 +96,37 @@ var baseConfigFns = map[string]VMConfigFns{
 			return "vm config net " + strings.Join(nics, " ")
 		},
 	},
+	"uuid": vmConfigString(func(vm interface{}) *string {
+		return &mustBaseConfig(vm).UUID
+	}, ""),
+	"snapshot": vmConfigBool(func(vm interface{}) *bool {
+		return &mustBaseConfig(vm).Snapshot
+	}, true),
+}
+
+// Functions for configuring container-based VMs. Note: if keys overlap with
+// vmConfigFns, the functions in vmConfigFns take priority.
+var containerConfigFns = map[string]VMConfigFns{
+	"filesystem": vmConfigString(func(vm interface{}) *string {
+		return &mustContainerConfig(vm).FSPath
+	}, ""),
+	"hostname": vmConfigString(func(vm interface{}) *string {
+		return &mustContainerConfig(vm).Hostname
+	}, ""),
+	"init": {
+		Update: func(v interface{}, c *minicli.Command) error {
+			vm := mustContainerConfig(v)
+			vm.Init = c.ListArgs["init"]
+			return nil
+		},
+		Clear: func(vm interface{}) {
+			mustContainerConfig(vm).Init = []string{"/init"}
+		},
+		Print: func(vm interface{}) string { return fmt.Sprintf("%v", mustContainerConfig(vm).Init) },
+	},
+	"fifo": vmConfigInt(func(vm interface{}) *int {
+		return &mustContainerConfig(vm).Fifos
+	}, "number", 0),
 }
 
 // Functions for configuring KVM-based VMs. Note: if keys overlap with
@@ -105,15 +144,9 @@ var kvmConfigFns = map[string]VMConfigFns{
 	"migrate": vmConfigString(func(vm interface{}) *string {
 		return &mustKVMConfig(vm).MigratePath
 	}, ""),
-	"uuid": vmConfigString(func(vm interface{}) *string {
-		return &mustKVMConfig(vm).UUID
-	}, ""),
 	"cpu": vmConfigString(func(vm interface{}) *string {
 		return &mustKVMConfig(vm).CPU
 	}, DefaultKVMCPU),
-	"snapshot": vmConfigBool(func(vm interface{}) *bool {
-		return &mustKVMConfig(vm).Snapshot
-	}, true),
 	"serial": vmConfigInt(func(vm interface{}) *int {
 		return &mustKVMConfig(vm).SerialPorts
 	}, "number", 0),
