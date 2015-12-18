@@ -1,3 +1,7 @@
+// Copyright (2015) Sandia Corporation.
+// Under the terms of Contract DE-AC04-94AL85000 with Sandia Corporation,
+// the U.S. Government retains certain rights in this software.
+
 package miniwifi
 
 import (
@@ -32,7 +36,7 @@ type Modem struct {
 	scanResults     []*ScanResult
 	netIdChan       chan int
 
-	NetworkNameChan		chan string	// We put the name of the current wifi network on here
+	NetworkNameChan chan string // We put the name of the current wifi network on here
 }
 
 func NewModem(controlPath, monitorPath string) (*Modem, error) {
