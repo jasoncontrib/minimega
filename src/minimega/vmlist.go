@@ -164,6 +164,18 @@ func (vms VMs) findVm(idOrName string) VM {
 	return vms[id]
 }
 
+// findVmsByType finds VMs by type, such as KVM or Android
+func (vms VMs) findVmsByType(vt VMType) []VM {
+	r := []VM{}
+	for _, v := range vms {
+		if v.GetType() == vt {
+			r = append(r, v)
+		}
+	}
+
+	return r
+}
+
 // launch one VM of a given type. This call should be "non-blocking" -- the VM
 // will ack on the provided channel when it has finished launching.
 func (vms VMs) launch(name string, vmType VMType, ack chan int) error {

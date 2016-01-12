@@ -727,6 +727,27 @@ Note: this configuration only applies to KVM-based VMs.`,
 			return cliVmConfigField(c, "snapshot")
 		}),
 	},
+	{ // vm config telephony
+		HelpShort: "configure the telephone network of a mobile VM",
+		HelpLong: `
+Set the telephone network number prefix for newly launched VMs. For example:
+
+	vm config telephony 223344
+
+Would cause newly launched VMs to be assigned numbers 2233440000, 2233440001,
+and so on. Number blocks should not overlap, the following produces and error:
+
+	vm config telephony 223344
+	vm config telephony 22334
+
+Note: this configuration only applies to Android-based VMs.`,
+		Patterns: []string{
+			"vm config telephony [prefix]",
+		},
+		Call: wrapSimpleCLI(func(c *minicli.Command) *minicli.Response {
+			return cliVmConfigField(c, "telephony")
+		}),
+	},
 	{ // vm config hostname
 		HelpShort: "set a hostname for containers",
 		HelpLong: `
@@ -779,27 +800,6 @@ Fifos are created using mkfifo() and have all of the same usage constraints.`,
 			return cliVmConfigField(c, "fifo")
 		}),
 	},
-	{ // vm config telephony
-		HelpShort: "configure the telephone network of a mobile VM",
-		HelpLong: `
-Set the telephone network number prefix for newly launched VMs. For example:
-
-	vm config telephony 223344
-
-Would cause newly launched VMs to be assigned numbers 2233440000, 2233440001,
-and so on. Number blocks should not overlap, the following produces and error:
-
-	vm config telephony 223344
-	vm config telephony 22334
-
-Note: this configuration only applies to Android-based VMs.`,
-		Patterns: []string{
-			"vm config telephony [prefix]",
-		},
-		Call: wrapSimpleCLI(func(c *minicli.Command) *minicli.Response {
-			return cliVmConfigField(c, "telephony")
-		}),
-	},
 	{ // clear vm config
 		HelpShort: "reset vm config to the default value",
 		HelpLong: `
@@ -832,7 +832,7 @@ to the default value.`,
 			"clear vm config <uuid,>",
 			"clear vm config <serial,>",
 			"clear vm config <virtio-serial,>",
-
+			
 			// ContainerConfig
 			"clear vm config <hostname,>",
 			"clear vm config <filesystem,>",
@@ -1133,8 +1133,8 @@ func cliClearVmConfig(c *minicli.Command) *minicli.Response {
 
 	var clearAll = len(c.BoolArgs) == 0
 	var clearKVM = clearAll || (len(c.BoolArgs) == 1 && c.BoolArgs["kvm"])
-	var clearContainer = clearAll || (len(c.BoolArgs) == 1 && c.BoolArgs["container"])
 	var clearAndroid = clearAll || (len(c.BoolArgs) == 1 && c.BoolArgs["android"])
+	var clearContainer = clearAll || (len(c.BoolArgs) == 1 && c.BoolArgs["container"])
 	var cleared bool
 
 	for k, fns := range baseConfigFns {

@@ -5,6 +5,7 @@
 package main
 
 import "testing"
+import "math"
 
 var testPrefixes = []struct {
 	Prefix int
@@ -49,4 +50,39 @@ func TestNMEAString(t *testing.T) {
 	got := toNMEAString(lat, long, accuracy)
 
 	t.Log(got)
+
+	loc, err := fromNMEA(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if math.Abs(lat-loc.lat) < 0.0001 && math.Abs(long-loc.long) < 0.0001 {
+		t.Log("Successfully converted to NMEA and back")
+	} else {
+		t.Fatalf("Failed to convert to NMEA and back: original lat = %v, new = %v\noriginal long=%v, new = %v", lat, loc.lat, long, loc.long)
+	}
+}
+
+func TestLocationDistance(t *testing.T) {
+	loc1 := location{lat: 37, long: -122}
+	loc2 := location{lat: 37.00001, long: -122}
+	expectedDistance := 1.1112
+
+	distance := locationDistance(loc1, loc2)
+	if math.Abs(distance-expectedDistance) > .01 {
+		t.Fatalf("seriously inaccurate results, expected %v meters, got %v", expectedDistance, distance)
+	} else {
+		t.Logf("Successfully measured distance, expected %v meters, got %v", expectedDistance, distance)
+	}
+
+	loc1 = location{lat: 37, long: -122}
+	loc2 = location{lat: 37.001, long: -122.001}
+	expectedDistance = 142.3
+
+	distance = locationDistance(loc1, loc2)
+	if math.Abs(distance-expectedDistance) > .1 {
+		t.Fatalf("seriously inaccurate results, expected %v meters, got %v", expectedDistance, distance)
+	} else {
+		t.Logf("Successfully measured distance, expected %v meters, got %v", expectedDistance, distance)
+	}
 }

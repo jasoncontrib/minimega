@@ -130,21 +130,25 @@ func (m *Modem) Close() {
 	close(m.kill)
 }
 
-func (m *Modem) UpdateScanResults(ssids ...string) {
+type APInfo struct {
+	SSID  string
+	Power int
+}
+
+func (m *Modem) UpdateScanResults(aps []APInfo) {
 	// First, clear old scan results
 	m.scanResults = nil
 
-	for id, ssid := range ssids {
+	for id, ap := range aps {
 		id++ // increment by 1 so id starts at 1
 		bssid := fmt.Sprintf("00:00:00:%02x:%02x:%02x", (id/65536)%256, (id/256)%256, id%256)
 		// defaults, static values
 		freq := 2412              // channel 1
-		level := -44              // in dBm | 0 is 100% signal. -100 is ~0% signal. -44 should still be 5 bars. -73 should be 2-3 bars.
+		level := ap.Power         // in dBm | 0 is 100% signal. -100 is ~0% signal. -44 should still be 5 bars. -73 should be 2-3 bars.
 		tsf := "0000000000000000" // timestamp of last beacon frame - ignore
 		flags := "[OPEN]"         // this might get changed later if we want WPA
-		m.scanResults = append(m.scanResults, &ScanResult{id, bssid, freq, level, tsf, flags, ssid})
+		m.scanResults = append(m.scanResults, &ScanResult{id, bssid, freq, level, tsf, flags, ap.SSID})
 	}
-
 	return
 }
 

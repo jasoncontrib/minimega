@@ -35,19 +35,19 @@ func mustKVMConfig(val interface{}) *KVMConfig {
 	return nil
 }
 
-func mustContainerConfig(val interface{}) *ContainerConfig {
-	if val, ok := val.(*ContainerConfig); ok {
-		return val
-	}
-	log.Fatal("`%#v` is not a ContainerConfig", val)
-	return nil
-}
-
 func mustAndroidConfig(val interface{}) *AndroidConfig {
 	if val, ok := val.(*AndroidConfig); ok {
 		return val
 	}
 	log.Fatal("`%#v` is not a AndroidConfig", val)
+	return nil
+}
+
+func mustContainerConfig(val interface{}) *ContainerConfig {
+	if val, ok := val.(*ContainerConfig); ok {
+		return val
+	}
+	log.Fatal("`%#v` is not a ContainerConfig", val)
 	return nil
 }
 
