@@ -182,6 +182,8 @@ func (vms VMs) launch(name string, vmType VMType, ack chan int) error {
 		vm = NewKVM(name)
 	case CONTAINER:
 		vm = NewContainer(name)
+	case Android:
+		vm = NewAndroid(name)
 	default:
 		// TODO
 	}
@@ -271,6 +273,13 @@ func (vms VMs) info() ([]string, [][]string, error) {
 	table := make([][]string, 0, len(vms))
 
 	masks := vmMasks
+/*
+	if vmType == "kvm" {
+		masks = kvmMasks
+	} else if vmType == "android" {
+		masks = androidMasks
+	}
+*/
 
 	for _, vm := range vms {
 		row := []string{}

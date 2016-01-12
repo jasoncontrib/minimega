@@ -1,0 +1,50 @@
+Android support
+02 Mar 2015
+
+
+As opposed to typical vm configuration:
+- vm config disk <disk_path>
+
+We will use for configuring mobile-specific options:
+- vm config android number [prefix] // specify an explicit number, or the first N digits of the 10-digit number
+- vm config android imei [number] // not supported yet
+- more to come...
+
+* Commands
+
+** GPS commands
+- gps get <vm name or id> // not implemented yet
+- gps push <vm name or id> <lat> <long> [acc]
+
+** SMS commands
+- sms push <vm name or id> <from phone number> <message>...
+- sms history [vm name or id] // pull down the inbox/outbox of a vm
+- clear sms history [vm name or id]
+- sms tap <phone number> <socket or file name> // let user create a phone number endpoint for vm to send sms messages to
+- sms lookup <number> // returns a vm id (if on another host, mesh_broadcast will identify the host), or nothing if no vm registered with that number
+- sms deliver <to phone number> <from phone number> <message>... // behaves like lookup + push, but in one operation
+- sms tap <regex> <path to socket> // creates host endpoint for sms where regex matches numbers you wish to receive sms's on, and path is a unix socket to dump incoming messages to
+
+
+// Example use case for having an sms tap on the host
+// cat /tmp/911 | respond_to_911.sh
+
+
+** New Data Structures
+
+// THIS IS PROBABLY NOT CORRECT // WORK IN PROGRESS
+
+type vmInfo struct { // add fields to vmInfo
+	extraVmInfo ExtraVmInfo
+}
+
+type ExtraVmInfo interface {
+
+}
+
+type AndroidVmInfo struct {
+	phoneNumber string // make sure to validate that all characters are 0-9
+	imei				string // not supported yet
+	gpsSerial		string // path to gps serial port
+	modemSerial	string // path to modem serial port
+}

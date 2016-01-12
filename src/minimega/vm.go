@@ -43,6 +43,7 @@ const (
 	_ VMType = iota
 	KVM
 	CONTAINER
+	Android
 )
 
 type VM interface {
@@ -101,6 +102,7 @@ type VMConfig struct {
 	BaseConfig
 	KVMConfig
 	ContainerConfig
+	AndroidConfig
 }
 
 // NetConfig contains all the network-related config for an interface. The IP
@@ -159,6 +161,7 @@ func init() {
 	gob.Register(VMs{})
 	gob.Register(&KvmVM{})
 	gob.Register(&ContainerVM{})
+	gob.Register(&AndroidVM{})
 }
 
 // NewVM creates a new VM, copying the currently set configs. After a VM is
@@ -195,6 +198,8 @@ func (s VMType) String() string {
 		return "kvm"
 	case CONTAINER:
 		return "container"
+	case Android:
+		return "android"
 	default:
 		return "???"
 	}
@@ -206,6 +211,8 @@ func ParseVMType(s string) (VMType, error) {
 		return KVM, nil
 	case "container":
 		return CONTAINER, nil
+	case "android":
+		return Android, nil
 	default:
 		return -1, errors.New("invalid VMType")
 	}
@@ -213,14 +220,15 @@ func ParseVMType(s string) (VMType, error) {
 
 func (old *VMConfig) Copy() *VMConfig {
 	return &VMConfig{
-		BaseConfig:      *old.BaseConfig.Copy(),
-		KVMConfig:       *old.KVMConfig.Copy(),
+		BaseConfig:    *old.BaseConfig.Copy(),
+		KVMConfig:     *old.KVMConfig.Copy(),
+		AndroidConfig: *old.AndroidConfig.Copy(),
 		ContainerConfig: *old.ContainerConfig.Copy(),
 	}
 }
 
 func (vm VMConfig) String() string {
-	return vm.BaseConfig.String() + vm.KVMConfig.String() + vm.ContainerConfig.String()
+	return vm.BaseConfig.String() + vm.KVMConfig.String() + vm.ContainerConfig.String() + vm.AndroidConfig.String()
 }
 
 func (old *BaseConfig) Copy() *BaseConfig {
