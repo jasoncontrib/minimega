@@ -74,8 +74,6 @@ Display information about all VMs:
 	vm info`,
 		Patterns: []string{
 			"vm info",
-			"vm info <kvm,>",
-			"vm info <android,>",
 		},
 		Call: wrapSimpleCLI(cliVmInfo),
 	},
@@ -883,15 +881,6 @@ func init() {
 func cliVmInfo(c *minicli.Command) *minicli.Response {
 	var err error
 	resp := &minicli.Response{Host: hostname}
-
-/*
-	vmType := ""
-	if c.BoolArgs["kvm"] {
-		vmType = "kvm"
-	} else if c.BoolArgs["android"] {
-		vmType = "android"
-	}
-*/
 
 	for _, vm := range vms {
 		// Populate the latest bandwidth stats for all VMs
