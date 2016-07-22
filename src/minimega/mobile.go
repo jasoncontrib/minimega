@@ -74,7 +74,7 @@ func cliMobileAP(c *minicli.Command, resp *minicli.Response) error {
 			return err
 		}
 		// There's not always a bridge!
-		ap.bridge = DEFAULT_BRIDGE
+		ap.bridge = DefaultBridge
 		if c.StringArgs["bridge"] != "" {
 			ap.bridge = c.StringArgs["bridge"]
 		}

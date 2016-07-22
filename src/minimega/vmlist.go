@@ -278,7 +278,7 @@ func (vms VMs) FindAndroidVM(s string) (*AndroidVM, error) {
 
 // findAndroidVm is FindAndroidVM without locking vmLock.
 func (vms VMs) findAndroidVM(s string) (*AndroidVM, error) {
-	vm := vms.findVM(s)
+	vm := vms.findVM(s, true)
 	if vm == nil {
 		return nil, vmNotFound(s)
 	}

@@ -136,10 +136,14 @@ func (vm *AndroidConfig) String() string {
 	return o.String()
 }
 
-func NewAndroid(name string) *AndroidVM {
+func NewAndroid(name string) (*AndroidVM, error) {
 	vm := new(AndroidVM)
 
-	vm.KvmVM = *NewKVM(name)
+	nkvm, err := NewKVM(name)
+	if err != nil {
+		return nil, err
+	}
+	vm.KvmVM = *nkvm
 	vm.Type = Android
 
 	vm.AndroidConfig = vmConfig.AndroidConfig.Copy() // deep-copy configured fields
@@ -162,7 +166,22 @@ func NewAndroid(name string) *AndroidVM {
 
 	vm.VirtioPorts += AndroidVirtioPorts
 
-	return vm
+	return vm, nil
+}
+
+func (vm *AndroidVM) Copy() VM {
+        vm.lock.Lock()
+        defer vm.lock.Unlock()
+
+        vm2 := new(AndroidVM)
+
+        // Make shallow copies of all fields
+        *vm2 = *vm
+
+        // Make deep copies
+        vm2.AndroidConfig = vm.AndroidConfig.Copy()
+
+        return vm2
 }
 
 func (vm *AndroidVM) String() string {
