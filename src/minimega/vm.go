@@ -5,11 +5,13 @@
 package main
 
 import (
+	"bridge"
 	"bytes"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"ipmac"
 	log "minilog"
@@ -43,12 +45,11 @@ const (
 )
 
 type VM interface {
-	Config() *BaseConfig
-
-	GetID() int           // GetID returns the VM's per-host unique ID
-	GetName() string      // GetName returns the VM's per-host unique name
-	GetNamespace() string // GetNamespace returns the VM's namespace
-	GetHost() string      // GetHost returns the hostname that the VM is running on
+	GetID() int               // GetID returns the VM's per-host unique ID
+	GetName() string          // GetName returns the VM's per-host unique name
+	GetNamespace() string     // GetNamespace returns the VM's namespace
+	GetNetworks() []NetConfig // GetNetworks returns an ordered, deep copy of the NetConfigs associated with the vm.
+	GetHost() string          // GetHost returns the hostname that the VM is running on
 	GetState() VMState
 	GetType() VMType
 	GetInstancePath() string
@@ -69,6 +70,14 @@ type VM interface {
 	GetTags() map[string]string // GetTags returns a copy of the tags
 	ClearTag(string)            // ClearTag deletes one or all tags
 
+	// SaveConfig writes the commands to relaunch this VM with the same
+	// config to the io.Writer.
+	SaveConfig(io.Writer) error
+
+	// Conflicts checks whether the VMs have conflicting configs. Called
+	// when we create a VM but before adding it to the list of VMs.
+	Conflicts(VM) error
+
 	SetCCActive(bool)
 	UpdateBW()
 
@@ -79,6 +88,15 @@ type VM interface {
 	// NetworkDisconnect updates the VM's config to reflect that the specified
 	// tap has been disconnected.
 	NetworkDisconnect(int) error
+
+	// Qos functions
+	GetQos() [][]bridge.QosOption
+	UpdateQos(uint, bridge.QosOption) error
+	ClearQos(uint) error
+	ClearAllQos() error
+
+	// Make a deep copy that shouldn't be used for anything but reads
+	Copy() VM
 }
 
 // BaseConfig contains all fields common to all VM types.
@@ -109,7 +127,8 @@ type NetConfig struct {
 	Driver string
 	IP4    string
 	IP6    string
-	Stats  *TapStat // Most recent bandwidth measurements for Tap
+
+	RxRate, TxRate float64 // Most recent bandwidth measurements for Tap
 }
 
 // BaseVM provides the bare-bones for base VM functionality. It implements
@@ -131,12 +150,17 @@ type BaseVM struct {
 	instancePath string
 }
 
-// Valid names for output masks for vm info, in preferred output order
-var vmMasks = []string{
+// Valid names for output masks for `vm info`, in preferred output order
+var vmInfo = []string{
 	"id", "name", "state", "namespace", "memory", "vcpus", "type", "vlan",
 	"bridge", "tap", "mac", "ip", "ip6", "bandwidth", "migrate", "disk",
 	"snapshot", "initrd", "kernel", "cdrom", "append", "uuid", "cc_active",
-	"tags",
+	"tags", "qos",
+}
+
+// Valid names for output masks for `vm summary`, in preferred output order
+var vmInfoLite = []string{
+	"id", "name", "state", "namespace", "type", "vlan", "uuid", "cc_active",
 }
 
 func init() {
@@ -156,7 +180,7 @@ func init() {
 	gob.Register(&AndroidVM{})
 }
 
-func NewVM(name string, vmType VMType) VM {
+func NewVM(name string, vmType VMType) (VM, error) {
 	switch vmType {
 	case KVM:
 		return NewKVM(name)
@@ -166,7 +190,7 @@ func NewVM(name string, vmType VMType) VM {
 		return NewAndroid(name)
 	}
 
-	return nil
+	return nil, errors.New("unknown VM type")
 }
 
 // NewBaseVM creates a new VM, copying the currently set configs. After a VM is
@@ -188,6 +212,15 @@ func NewBaseVM(name string) *BaseVM {
 	// generate a UUID if we don't have one
 	if vm.UUID == "" {
 		vm.UUID = generateUUID()
+	}
+
+	// generate MAC addresses if any are unassigned. Don't bother checking
+	// for collisions -- based on the birthday paradox, there's only a
+	// 0.016% chance of collisions when running 10K VMs (one interface/VM).
+	for i := range vm.Networks {
+		if vm.Networks[i].MAC == "" {
+			vm.Networks[i].MAC = randomMac()
+		}
 	}
 
 	vm.kill = make(chan bool)
@@ -300,6 +333,33 @@ func (vm *BaseConfig) NetworkString() string {
 	return fmt.Sprintf("[%s]", strings.Join(parts, " "))
 }
 
+func (vm *BaseConfig) QosString(b, t string) string {
+	var val string
+	br, err := getBridge(b)
+	if err != nil {
+		return val
+	}
+
+	ops := br.GetQos(t)
+	if ops == nil {
+		return ""
+	}
+
+	val += fmt.Sprintf("%s: ", t)
+	for _, op := range ops {
+		if op.Type == bridge.Delay {
+			val += fmt.Sprintf("delay %s ", op.Value)
+		}
+		if op.Type == bridge.Loss {
+			val += fmt.Sprintf("loss %s ", op.Value)
+		}
+		if op.Type == bridge.Rate {
+			val += fmt.Sprintf("rate %s ", op.Value)
+		}
+	}
+	return strings.Trim(val, " ")
+}
+
 func (vm *BaseConfig) TagsString() string {
 	res, err := json.Marshal(vm.Tags)
 	if err != nil {
@@ -320,6 +380,17 @@ func (vm *BaseVM) GetName() string {
 
 func (vm *BaseVM) GetNamespace() string {
 	return vm.Namespace
+}
+
+func (vm *BaseVM) GetNetworks() []NetConfig {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	// Make a deep copy of the NetConfigs
+	n := make([]NetConfig, len(vm.Networks))
+	copy(n, vm.Networks)
+
+	return n
 }
 
 func (vm *BaseVM) GetHost() string {
@@ -405,16 +476,94 @@ func (vm *BaseVM) ClearTag(t string) {
 }
 
 func (vm *BaseVM) UpdateBW() {
-	bandwidthLock.Lock()
-	defer bandwidthLock.Unlock()
-
 	vm.lock.Lock()
 	defer vm.lock.Unlock()
 
 	for i := range vm.Networks {
-		net := &vm.Networks[i]
-		net.Stats = bandwidthStats[net.Tap]
+		n := &vm.Networks[i]
+		tap, err := bridges.FindTap(n.Tap)
+		if err != nil {
+			// weird...
+			n.RxRate, n.TxRate = 0, 0
+			continue
+		}
+
+		n.RxRate, n.TxRate = tap.BandwidthStats()
 	}
+}
+
+func (vm *BaseVM) UpdateQos(tap uint, op bridge.QosOption) error {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	if tap >= uint(len(vm.Networks)) {
+		return fmt.Errorf("invalid tap index specified: %d", tap)
+	}
+
+	bName := vm.Networks[tap].Bridge
+	tapName := vm.Networks[tap].Tap
+
+	br, err := getBridge(bName)
+	if err != nil {
+		return err
+	}
+	return br.UpdateQos(tapName, op)
+}
+
+func (vm *BaseVM) ClearAllQos() error {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	for _, nc := range vm.Networks {
+		b, err := getBridge(nc.Bridge)
+		if err != nil {
+			log.Error("failed to get bridge %s for vm %s", nc.Bridge, vm.GetName())
+			return err
+		}
+		err = b.ClearQos(nc.Tap)
+		if err != nil {
+			log.Error("failed to remove qos from vm %s", vm.GetName())
+			return err
+		}
+	}
+	return nil
+}
+
+func (vm *BaseVM) ClearQos(tap uint) error {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	if tap >= uint(len(vm.Networks)) {
+		return fmt.Errorf("invalid tap index specified: %d", tap)
+	}
+	nc := vm.Networks[tap]
+	b, err := getBridge(nc.Bridge)
+	if err != nil {
+		return err
+	}
+
+	return b.ClearQos(nc.Tap)
+}
+
+func (vm *BaseVM) GetQos() [][]bridge.QosOption {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	var res [][]bridge.QosOption
+
+	for _, nc := range vm.Networks {
+		b, err := getBridge(nc.Bridge)
+		if err != nil {
+			log.Error("failed to get bridge %s for vm %s", nc.Bridge, vm.GetName())
+			continue
+		}
+
+		q := b.GetQos(nc.Tap)
+		if q != nil {
+			res = append(res, q)
+		}
+	}
+	return res
 }
 
 func (vm *BaseVM) SetCCActive(active bool) {
@@ -438,27 +587,27 @@ func (vm *BaseVM) NetworkConnect(pos int, bridge string, vlan int) error {
 
 	// Do this before disconnecting from the old bridge in case the new one was
 	// mistyped or invalid.
-	newBridge, err := getBridge(bridge)
+	dst, err := getBridge(bridge)
 	if err != nil {
 		return err
 	}
 
 	// Disconnect from the old bridge, if we were connected
 	if net.VLAN != DisconnectedVLAN {
-		oldBridge, err := getBridge(net.Bridge)
+		src, err := getBridge(net.Bridge)
 		if err != nil {
 			return err
 		}
 
-		err = oldBridge.TapRemove(net.Tap)
-		if err != nil {
+		if err := src.RemoveTap(net.Tap); err != nil {
 			return err
 		}
+
+		src.ReapTaps()
 	}
 
 	// Connect to the new bridge
-	err = newBridge.TapAdd(net.Tap, vlan, false)
-	if err != nil {
+	if err := dst.AddTap(net.Tap, vlan, false); err != nil {
 		return err
 	}
 
@@ -486,13 +635,12 @@ func (vm *BaseVM) NetworkDisconnect(pos int) error {
 
 	log.Debug("disconnect network connection: %v %v %v", vm.ID, pos, net)
 
-	b, err := getBridge(net.Bridge)
+	br, err := getBridge(net.Bridge)
 	if err != nil {
 		return err
 	}
 
-	err = b.TapRemove(net.Tap)
-	if err != nil {
+	if err := br.RemoveTap(net.Tap); err != nil {
 		return err
 	}
 
@@ -529,7 +677,7 @@ func (vm *BaseVM) info(key string) (string, error) {
 			if net.VLAN == DisconnectedVLAN {
 				vals = append(vals, "disconnected")
 			} else {
-				vals = append(vals, fmt.Sprintf("%v", net.VLAN))
+				vals = append(vals, printVLAN(net.VLAN))
 			}
 		}
 	case "bridge":
@@ -554,10 +702,14 @@ func (vm *BaseVM) info(key string) (string, error) {
 		}
 	case "bandwidth":
 		for _, v := range vm.Networks {
-			if v.Stats == nil {
-				vals = append(vals, "N/A")
-			} else {
-				vals = append(vals, fmt.Sprintf("%v", v.Stats))
+			s := fmt.Sprintf("%.1f/%.1f (rx/tx MB/s)", v.RxRate, v.TxRate)
+			vals = append(vals, s)
+		}
+	case "qos":
+		for _, v := range vm.Networks {
+			s := vm.QosString(v.Bridge, v.Tap)
+			if s != "" {
+				vals = append(vals, s)
 			}
 		}
 	case "tags":
@@ -618,6 +770,30 @@ func (vm *BaseVM) writeTaps() error {
 	return nil
 }
 
+func (vm *BaseVM) conflicts(vm2 BaseVM) error {
+	// Return error if two VMs have same name or UUID
+	if vm.Namespace == vm2.Namespace {
+		if vm.Name == vm2.Name {
+			return fmt.Errorf("duplicate VM name: %s", vm.Name)
+		}
+
+		if vm.UUID == vm2.UUID {
+			return fmt.Errorf("duplicate VM UUID: %s", vm.UUID)
+		}
+	}
+
+	// Warn if we see two VMs that share a MAC on the same VLAN
+	for _, n := range vm.Networks {
+		for _, n2 := range vm2.Networks {
+			if n.MAC == n2.MAC && n.VLAN == n2.VLAN {
+				log.Warn("duplicate MAC/VLAN: %v/%v for %v and %v", vm.ID, vm2.ID)
+			}
+		}
+	}
+
+	return nil
+}
+
 // inNamespace tests whether vm is part of active namespace, if there is one.
 // When there isn't an active namespace, all vms return true.
 func inNamespace(vm VM) bool {
@@ -648,4 +824,15 @@ func vmNotAndroid(idOrName string) error {
 
 func isVmNotFound(err string) bool {
 	return strings.HasPrefix(err, "vm not found: ")
+}
+
+func getConfig(vm VM) BaseConfig {
+	switch vm := vm.(type) {
+	case *KvmVM:
+		return vm.BaseConfig
+	case *ContainerVM:
+		return vm.BaseConfig
+	}
+
+	return BaseConfig{}
 }

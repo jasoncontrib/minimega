@@ -26,11 +26,11 @@ all data seen on that interface is captured to file.
 For example, to capture netflow data on bridge mega_bridge to file in ascii
 mode and with gzip compression:
 
-	capture netflow mega_bridge file foo.netflow ascii gzip
+	capture netflow bridge mega_bridge file foo.netflow ascii gzip
 
 You can change the active flow timeout with:
 
-	capture netflow mega_bridge timeout <timeout>
+	capture netflow timeout <timeout>
 
 With <timeout> in seconds.
 
@@ -224,9 +224,6 @@ func cliCaptureNetflow(c *minicli.Command, resp *minicli.Response) error {
 			c.BoolArgs["ascii"],
 		)
 	}
-
-	captureLock.Lock()
-	defer captureLock.Unlock()
 
 	// List captures
 	resp.Header = []string{"ID", "Bridge", "Path", "Mode", "Compress"}

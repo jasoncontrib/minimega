@@ -70,7 +70,7 @@ For more documentation, see the article "Command and Control API Tutorial".`,
 			"cc <background,> <command>...",
 
 			"cc <process,> <list,> <vm id, name, uuid or all>",
-			"cc <process,> <kill,> <pid>",
+			"cc <process,> <kill,> <pid or all>",
 
 			"cc <commands,>",
 
@@ -187,8 +187,6 @@ func cliCCResponses(c *minicli.Command, resp *minicli.Response) error {
 	raw := c.BoolArgs["raw"]
 	id := c.StringArgs["id"]
 
-	var files []string
-
 	walker := func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -206,7 +204,20 @@ func cliCCResponses(c *minicli.Command, resp *minicli.Response) error {
 
 		if !info.IsDir() {
 			log.Debug("add to response files: %v", path)
-			files = append(files, path)
+
+			data, err := ioutil.ReadFile(path)
+			if err != nil {
+				return err
+			}
+
+			if !raw {
+				relPath, err := filepath.Rel(filepath.Join(*f_iomBase, ron.RESPONSE_PATH), path)
+				if err != nil {
+					return err
+				}
+				resp.Response += fmt.Sprintf("%v:\n", relPath)
+			}
+			resp.Response += fmt.Sprintf("%v\n", string(data))
 		}
 		return nil
 	}
@@ -237,23 +248,6 @@ func cliCCResponses(c *minicli.Command, resp *minicli.Response) error {
 		if err := filepath.Walk(p, walker); err != nil {
 			return err
 		}
-	}
-
-	// now output files
-	for _, file := range files {
-		data, err := ioutil.ReadFile(file)
-		if err != nil {
-			return err
-		}
-
-		if !raw {
-			path, err := filepath.Rel(filepath.Join(*f_iomBase, ron.RESPONSE_PATH), file)
-			if err != nil {
-				return err
-			}
-			resp.Response += fmt.Sprintf("%v:\n", path)
-		}
-		resp.Response += fmt.Sprintf("%v\n", string(data))
 	}
 
 	return nil
@@ -421,25 +415,42 @@ func cliCCBackground(c *minicli.Command, resp *minicli.Response) error {
 	return nil
 }
 
+// ccProcessKill kills a process by PID for VMs that aren't filtered.
+func ccProcessKill(pid int) {
+	cmd := &ron.Command{
+		PID:    pid,
+		Filter: ccGetFilter(),
+	}
+
+	id := ccNode.NewCommand(cmd)
+	log.Debug("generated command %v :%v", id, cmd)
+
+	ccMapPrefix(id)
+}
+
+func cliCCProcessKill(c *minicli.Command, resp *minicli.Response) error {
+	// kill all processes
+	if c.StringArgs["pid"] == Wildcard {
+		ccProcessKill(-1)
+
+		return nil
+	}
+
+	// kill single process
+	pid, err := strconv.Atoi(c.StringArgs["pid"])
+	if err != nil {
+		return err
+	}
+
+	ccProcessKill(pid)
+
+	return nil
+}
+
 // process
 func cliCCProcess(c *minicli.Command, resp *minicli.Response) error {
 	if c.BoolArgs["kill"] {
-		pid, err := strconv.Atoi(c.StringArgs["pid"])
-		if err != nil {
-			return err
-		}
-
-		cmd := &ron.Command{
-			PID:    pid,
-			Filter: ccGetFilter(),
-		}
-
-		id := ccNode.NewCommand(cmd)
-		log.Debug("generated command %v :%v", id, cmd)
-
-		ccMapPrefix(id)
-
-		return nil
+		return cliCCProcessKill(c, resp)
 	}
 
 	// list processes
