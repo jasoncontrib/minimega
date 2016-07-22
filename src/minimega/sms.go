@@ -6,7 +6,6 @@ package main
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"strconv"
 )
@@ -36,23 +35,18 @@ func normalizeNumber(num string) (int, error) {
 	return v, nil
 }
 
-func smsClear(vm string) error {
-	if vm == Wildcard {
-		for _, vm := range vms {
-			vm, ok := vm.(*AndroidVM)
-			if !ok {
-				continue
-			}
-
+func smsClear(vmname string) error {
+	if vmname == Wildcard {
+		for _, vm := range vms.FindAndroidVMs() {
 			vm.Modem.ClearHistory()
 		}
-	} else if v := vms.findVm(vm); v == nil {
-		return vmNotFound(vm)
-	} else if vm, ok := v.(*AndroidVM); !ok {
-		return fmt.Errorf("%v is not an Android VM", vm)
-	} else {
-		vm.Modem.ClearHistory()
+		return nil
 	}
+	vm, err := vms.FindAndroidVM(vmname)
+	if err != nil {
+		return err
+	}
+	vm.Modem.ClearHistory()
 
 	return nil
 }

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"math"
 	"minicli"
 	"strconv"
@@ -40,9 +41,7 @@ func init() {
 	registerHandlers("mobile", mobileCLIHandlers)
 }
 
-func cliMobileAP(c *minicli.Command) *minicli.Response {
-	resp := &minicli.Response{Host: hostname}
-
+func cliMobileAP(c *minicli.Command, resp *minicli.Response) error {
 	if c.BoolArgs["create"] {
 		ap := accessPoint{}
 		var err error
@@ -51,8 +50,7 @@ func cliMobileAP(c *minicli.Command) *minicli.Response {
 			// Convert milliwatts EIRP into dBm
 			eirp, err := strconv.ParseFloat(c.StringArgs["milliwatts"], 64)
 			if err != nil {
-				resp.Error = "signal power must be a number"
-				return resp
+				return errors.New("signal power must be a number")
 			}
 			ap.mW = eirp
 			ap.power = int(0.5 + (10 * math.Log10(eirp))) // int(0.5 + f) rounds a float
@@ -60,23 +58,20 @@ func cliMobileAP(c *minicli.Command) *minicli.Response {
 			// We only have latitude and longitude if there's a power value
 			lat, err := strconv.ParseFloat(c.StringArgs["lat"], 64)
 			if err != nil {
-				resp.Error = "invalid latitude"
-				return resp
+				return errors.New("invalid latitude")
 			}
 			long, err := strconv.ParseFloat(c.StringArgs["long"], 64)
 			if err != nil {
-				resp.Error = "invalid longitude"
-				return resp
+				return errors.New("invalid longitude")
 			}
 			ap.loc = location{lat: lat, long: long, accuracy: 1.0}
 		}
 
 		// Populate accessPoint struct
 		ap.ssid = c.StringArgs["ssid"]
-		ap.vlan, err = strconv.Atoi(c.StringArgs["vlan"])
+		ap.vlan, err = lookupVLAN(c.StringArgs["vlan"])
 		if err != nil {
-			resp.Error = "Invalid vlan"
-			return resp
+			return err
 		}
 		// There's not always a bridge!
 		ap.bridge = DEFAULT_BRIDGE
@@ -89,18 +84,19 @@ func cliMobileAP(c *minicli.Command) *minicli.Response {
 
 		// Trigger a re-calculation of accessible APs for all Android devices
 		updateAccessPointsVisible()
+		return nil
 	} else if c.BoolArgs["delete"] {
 		ssid := c.StringArgs["ssid"]
 		if _, ok := wifiAPs[ssid]; !ok {
-			resp.Error = "no such access point"
+			return errors.New("no such access point")
 		}
 		delete(wifiAPs, ssid)
 		updateAccessPointsVisible()
-	} else {
-		// List all APs
-		apList(resp)
+		return nil
 	}
-	return resp
+	// List all APs
+	apList(resp)
+	return nil
 }
 
 func apList(resp *minicli.Response) {

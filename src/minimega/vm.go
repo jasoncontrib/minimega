@@ -7,10 +7,11 @@ package main
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"minicli"
+	"ipmac"
 	log "minilog"
 	"os"
 	"path/filepath"
@@ -28,13 +29,8 @@ const (
 )
 
 var (
-	killAck  chan int   // channel that all VMs ack on when killed
-	vmIdChan chan int   // channel of new VM IDs
-	vmLock   sync.Mutex // lock for synchronizing access to vms
-
-	vmConfig VMConfig // current vm config, updated by CLI
-
-	savedInfo = make(map[string]VMConfig) // saved configs, may be reloaded
+	killAck chan int // channel that all VMs ack on when killed
+	vmID    *Counter // channel of new VM IDs
 )
 
 type VMType int
@@ -49,16 +45,17 @@ const (
 type VM interface {
 	Config() *BaseConfig
 
-	GetID() int      // GetID returns the VM's per-host unique ID
-	GetName() string // GetName returns the VM's per-host unique name
+	GetID() int           // GetID returns the VM's per-host unique ID
+	GetName() string      // GetName returns the VM's per-host unique name
+	GetNamespace() string // GetNamespace returns the VM's namespace
+	GetHost() string      // GetHost returns the hostname that the VM is running on
 	GetState() VMState
 	GetType() VMType
 	GetInstancePath() string
+	GetUUID() string
 
-	// Launch launches the VM and acks on the provided channel when the VM has
-	// been launched.
-	Launch(chan int) error
-	// TODO: Make kill have ack channel?
+	// Life cycle functions
+	Launch() error
 	Kill() error
 	Start() error
 	Stop() error
@@ -67,12 +64,13 @@ type VM interface {
 	String() string
 	Info(string) (string, error)
 
-	Tag(tag string) string
-	GetTags() map[string]string
-	ClearTags()
+	Tag(string) string          // Tag gets the value of the given tag
+	SetTag(string, string)      // SetTag updates the given tag
+	GetTags() map[string]string // GetTags returns a copy of the tags
+	ClearTag(string)            // ClearTag deletes one or all tags
 
+	SetCCActive(bool)
 	UpdateBW()
-	UpdateCCActive()
 
 	// NetworkConnect updates the VM's config to reflect that it has been
 	// connected to the specified bridge and VLAN.
@@ -85,6 +83,9 @@ type VM interface {
 
 // BaseConfig contains all fields common to all VM types.
 type BaseConfig struct {
+	Namespace string // namespace this VM belongs to
+	Host      string // hostname where this VM is running
+
 	Vcpus  string // number of virtual cpus
 	Memory string // memory for the vm, in megabytes
 
@@ -92,17 +93,9 @@ type BaseConfig struct {
 
 	Snapshot bool
 	UUID     string
-	ActiveCC bool // Whether CC is active, updated by calling UpdateCCActive
-}
+	ActiveCC bool // set when CC is active
 
-// VMConfig contains all the configs possible for a VM. When a VM of a
-// particular kind is launched, only the pertinent configuration is copied so
-// fields from other configs will have the zero value for the field type.
-type VMConfig struct {
-	BaseConfig
-	KVMConfig
-	ContainerConfig
-	AndroidConfig
+	Tags map[string]string
 }
 
 // NetConfig contains all the network-related config for an interface. The IP
@@ -126,9 +119,9 @@ type NetConfig struct {
 type BaseVM struct {
 	BaseConfig // embed
 
-	lock sync.Mutex // lock to synchronize changes to VM
+	lock sync.Mutex // synchronizes changes to this VM
 
-	kill chan bool // channel to signal the VM to shut down
+	kill chan bool // channel to signal the vm to shut down
 
 	ID    int
 	Name  string
@@ -136,21 +129,20 @@ type BaseVM struct {
 	Type  VMType
 
 	instancePath string
-
-	Tags map[string]string
 }
 
 // Valid names for output masks for vm info, in preferred output order
 var vmMasks = []string{
-	"id", "name", "state", "memory", "vcpus", "type", "vlan", "bridge", "tap",
-	"mac", "ip", "ip6", "bandwidth", "migrate", "disk", "snapshot", "initrd",
-	"kernel", "cdrom", "append", "uuid", "cc_active", "tags",
+	"id", "name", "state", "namespace", "memory", "vcpus", "type", "vlan",
+	"bridge", "tap", "mac", "ip", "ip6", "bandwidth", "migrate", "disk",
+	"snapshot", "initrd", "kernel", "cdrom", "append", "uuid", "cc_active",
+	"tags",
 }
 
 func init() {
 	killAck = make(chan int)
 
-	vmIdChan = makeIDChan()
+	vmID = NewCounter()
 
 	// Reset everything to default
 	for _, fns := range baseConfigFns {
@@ -164,18 +156,34 @@ func init() {
 	gob.Register(&AndroidVM{})
 }
 
-// NewVM creates a new VM, copying the currently set configs. After a VM is
+func NewVM(name string, vmType VMType) VM {
+	switch vmType {
+	case KVM:
+		return NewKVM(name)
+	case CONTAINER:
+		return NewContainer(name)
+	case Android:
+		return NewAndroid(name)
+	}
+
+	return nil
+}
+
+// NewBaseVM creates a new VM, copying the currently set configs. After a VM is
 // created, it can be Launched.
-func NewVM(name string) *BaseVM {
+func NewBaseVM(name string) *BaseVM {
 	vm := new(BaseVM)
 
-	vm.BaseConfig = *vmConfig.BaseConfig.Copy() // deep-copy configured fields
-	vm.ID = <-vmIdChan
+	vm.BaseConfig = vmConfig.BaseConfig.Copy() // deep-copy configured fields
+	vm.ID = vmID.Next()
 	if name == "" {
 		vm.Name = fmt.Sprintf("vm-%d", vm.ID)
 	} else {
 		vm.Name = name
 	}
+
+	vm.Namespace = GetNamespaceName()
+	vm.Host = hostname
 
 	// generate a UUID if we don't have one
 	if vm.UUID == "" {
@@ -187,7 +195,10 @@ func NewVM(name string) *BaseVM {
 	vm.instancePath = filepath.Join(*f_base, strconv.Itoa(vm.ID))
 
 	vm.State = VM_BUILDING
-	vm.Tags = make(map[string]string)
+
+	// New VMs are returned pre-locked. This ensures that the first operation
+	// called on a new VM is Launch.
+	vm.lock.Lock()
 
 	return vm
 }
@@ -214,32 +225,51 @@ func ParseVMType(s string) (VMType, error) {
 	case "android":
 		return Android, nil
 	default:
-		return -1, errors.New("invalid VMType")
+		return 0, errors.New("invalid VMType")
 	}
 }
 
-func (old *VMConfig) Copy() *VMConfig {
-	return &VMConfig{
-		BaseConfig:    *old.BaseConfig.Copy(),
-		KVMConfig:     *old.KVMConfig.Copy(),
-		AndroidConfig: *old.AndroidConfig.Copy(),
-		ContainerConfig: *old.ContainerConfig.Copy(),
+// findVMType tries to find a key that parses to a valid VMType. Useful for
+// hunting through a command's BoolArgs.
+func findVMType(args map[string]bool) (VMType, error) {
+	for k := range args {
+		if res, err := ParseVMType(k); err == nil {
+			return res, nil
+		}
 	}
+
+	return 0, errors.New("invalid VMType")
 }
 
-func (vm VMConfig) String() string {
-	return vm.BaseConfig.String() + vm.KVMConfig.String() + vm.ContainerConfig.String() + vm.AndroidConfig.String()
+// TODO: Handle if there are spaces or commas in the tap/bridge names
+func (net NetConfig) String() (s string) {
+	parts := []string{}
+	if net.Bridge != "" {
+		parts = append(parts, net.Bridge)
+	}
+
+	parts = append(parts, printVLAN(net.VLAN))
+
+	if net.MAC != "" {
+		parts = append(parts, net.MAC)
+	}
+
+	return strings.Join(parts, ",")
 }
 
-func (old *BaseConfig) Copy() *BaseConfig {
-	res := new(BaseConfig)
-
+func (old BaseConfig) Copy() BaseConfig {
 	// Copy all fields
-	*res = *old
+	res := old
 
 	// Make deep copy of slices
 	res.Networks = make([]NetConfig, len(old.Networks))
 	copy(res.Networks, old.Networks)
+
+	// Make deep copy of tags
+	res.Tags = map[string]string{}
+	for k, v := range old.Tags {
+		res.Tags[k] = v
+	}
 
 	return res
 }
@@ -255,6 +285,7 @@ func (vm *BaseConfig) String() string {
 	fmt.Fprintf(w, "Networks:\t%v\n", vm.NetworkString())
 	fmt.Fprintf(w, "Snapshot:\t%v\n", vm.Snapshot)
 	fmt.Fprintf(w, "UUID:\t%v\n", vm.UUID)
+	fmt.Fprintf(w, "Tags:\t%v\n", vm.TagsString())
 	w.Flush()
 	fmt.Fprintln(&o)
 	return o.String()
@@ -269,20 +300,14 @@ func (vm *BaseConfig) NetworkString() string {
 	return fmt.Sprintf("[%s]", strings.Join(parts, " "))
 }
 
-// TODO: Handle if there are spaces or commas in the tap/bridge names
-func (net NetConfig) String() (s string) {
-	parts := []string{}
-	if net.Bridge != "" {
-		parts = append(parts, net.Bridge)
+func (vm *BaseConfig) TagsString() string {
+	res, err := json.Marshal(vm.Tags)
+	if err != nil {
+		log.Error("unable to marshal vm.Tags: %v", err)
+		return ""
 	}
 
-	parts = append(parts, strconv.Itoa(net.VLAN))
-
-	if net.MAC != "" {
-		parts = append(parts, net.MAC)
-	}
-
-	return strings.Join(parts, ",")
+	return string(res)
 }
 
 func (vm *BaseVM) GetID() int {
@@ -291,6 +316,18 @@ func (vm *BaseVM) GetID() int {
 
 func (vm *BaseVM) GetName() string {
 	return vm.Name
+}
+
+func (vm *BaseVM) GetNamespace() string {
+	return vm.Namespace
+}
+
+func (vm *BaseVM) GetHost() string {
+	return vm.Host
+}
+
+func (vm *BaseVM) GetUUID() string {
+	return vm.UUID
 }
 
 func (vm *BaseVM) GetState() VMState {
@@ -321,29 +358,58 @@ func (vm *BaseVM) Kill() error {
 	// http://golang.org/ref/spec#Receive_operator
 	close(vm.kill)
 
-	// TODO: ACK if killed?
 	return nil
 }
 
 func (vm *BaseVM) Flush() error {
+	ccNode.UnregisterVM(vm.UUID)
+
 	return os.RemoveAll(vm.instancePath)
 }
 
-func (vm *BaseVM) Tag(tag string) string {
-	return vm.Tags[tag]
+func (vm *BaseVM) Tag(t string) string {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	return vm.Tags[t]
+}
+
+func (vm *BaseVM) SetTag(t, v string) {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	vm.Tags[t] = v
 }
 
 func (vm *BaseVM) GetTags() map[string]string {
-	return vm.Tags
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	res := map[string]string{}
+	for k, v := range vm.Tags {
+		res[k] = v
+	}
+
+	return res
 }
 
-func (vm *BaseVM) ClearTags() {
-	vm.Tags = make(map[string]string)
+func (vm *BaseVM) ClearTag(t string) {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	if t == Wildcard {
+		vm.Tags = make(map[string]string)
+	} else {
+		delete(vm.Tags, t)
+	}
 }
 
 func (vm *BaseVM) UpdateBW() {
 	bandwidthLock.Lock()
 	defer bandwidthLock.Unlock()
+
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
 
 	for i := range vm.Networks {
 		net := &vm.Networks[i]
@@ -351,8 +417,11 @@ func (vm *BaseVM) UpdateBW() {
 	}
 }
 
-func (vm *BaseVM) UpdateCCActive() {
-	vm.ActiveCC = ccHasClient(vm.UUID)
+func (vm *BaseVM) SetCCActive(active bool) {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	vm.ActiveCC = active
 }
 
 func (vm *BaseVM) NetworkConnect(pos int, bridge string, vlan int) error {
@@ -433,22 +502,28 @@ func (vm *BaseVM) NetworkDisconnect(pos int) error {
 	return nil
 }
 
-func (vm *BaseVM) info(mask string) (string, error) {
-	if fns, ok := baseConfigFns[mask]; ok {
+// info returns information about the VM for the provided key.
+func (vm *BaseVM) info(key string) (string, error) {
+	if fns, ok := baseConfigFns[key]; ok {
 		return fns.Print(&vm.BaseConfig), nil
 	}
 
 	var vals []string
 
-	switch mask {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	switch key {
 	case "id":
-		return fmt.Sprintf("%v", vm.ID), nil
+		return strconv.Itoa(vm.ID), nil
 	case "name":
-		return fmt.Sprintf("%v", vm.Name), nil
+		return vm.Name, nil
+	case "namespace":
+		return vm.Namespace, nil
 	case "state":
-		return vm.GetState().String(), nil
+		return vm.State.String(), nil
 	case "type":
-		return vm.GetType().String(), nil
+		return vm.Type.String(), nil
 	case "vlan":
 		for _, net := range vm.Networks {
 			if net.VLAN == DisconnectedVLAN {
@@ -486,7 +561,7 @@ func (vm *BaseVM) info(mask string) (string, error) {
 			}
 		}
 	case "tags":
-		return fmt.Sprintf("%v", vm.Tags), nil
+		return vm.TagsString(), nil
 	case "cc_active":
 		return fmt.Sprintf("%v", vm.ActiveCC), nil
 	default:
@@ -496,16 +571,63 @@ func (vm *BaseVM) info(mask string) (string, error) {
 	return fmt.Sprintf("%v", vals), nil
 }
 
-// update the vm state, and write the state to file
+// setState updates the vm state, and write the state to file. Assumes that the
+// caller has locked the vm.
 func (vm *BaseVM) setState(s VMState) {
-	vm.lock.Lock()
-	defer vm.lock.Unlock()
-
+	log.Debug("updating vm %v state: %v -> %v", vm.ID, vm.State, s)
 	vm.State = s
+
 	err := ioutil.WriteFile(filepath.Join(vm.instancePath, "state"), []byte(s.String()), 0666)
 	if err != nil {
 		log.Error("write instance state file: %v", err)
 	}
+}
+
+// setError updates the vm state and records the error in the vm's tags.
+// Assumes that the caller has locked the vm.
+func (vm *BaseVM) setError(err error) {
+	vm.Tags["error"] = err.Error()
+	vm.setState(VM_ERROR)
+}
+
+// macSnooper listens for updates from the ipmac learner and updates the
+// specified network config.
+func (vm *BaseVM) macSnooper(net *NetConfig, updates <-chan ipmac.IP) {
+	for update := range updates {
+		// TODO: need to acquire VM lock?
+		if update.IP4 != "" {
+			net.IP4 = update.IP4
+		} else if update.IP6 != "" && !strings.HasPrefix(update.IP6, "fe80") {
+			net.IP6 = update.IP6
+		}
+	}
+}
+
+// writeTaps writes the vm's taps to disk in the vm's instance path.
+func (vm *BaseVM) writeTaps() error {
+	taps := []string{}
+	for _, net := range vm.Networks {
+		taps = append(taps, net.Tap)
+	}
+
+	f := filepath.Join(vm.instancePath, "taps")
+	if err := ioutil.WriteFile(f, []byte(strings.Join(taps, "\n")), 0666); err != nil {
+		return fmt.Errorf("write instance taps file: %v", err)
+	}
+
+	return nil
+}
+
+// inNamespace tests whether vm is part of active namespace, if there is one.
+// When there isn't an active namespace, all vms return true.
+func inNamespace(vm VM) bool {
+	if vm == nil {
+		return false
+	}
+
+	namespace := GetNamespaceName()
+
+	return namespace == "" || vm.GetNamespace() == namespace
 }
 
 func vmNotFound(idOrName string) error {
@@ -516,129 +638,14 @@ func vmNotRunning(idOrName string) error {
 	return fmt.Errorf("vm not running: %v", idOrName)
 }
 
-func vmNotPhotogenic(idOrName string) error {
-	return fmt.Errorf("vm does not support screenshots: %v", idOrName)
+func vmNotKVM(idOrName string) error {
+	return fmt.Errorf("vm not KVM: %v", idOrName)
 }
 
-// processVMNet processes the input specifying the bridge, vlan, and mac for
-// one interface to a VM and updates the vm config accordingly. This takes a
-// bit of parsing, because the entry can be in a few forms:
-// 	vlan
-//
-//	vlan,mac
-//	bridge,vlan
-//	vlan,driver
-//
-//	bridge,vlan,mac
-//	vlan,mac,driver
-//	bridge,vlan,driver
-//
-//	bridge,vlan,mac,driver
-// If there are 2 or 3 fields, just the last field for the presence of a mac
-func processVMNet(spec string) (res NetConfig, err error) {
-	// example: my_bridge,100,00:00:00:00:00:00
-	f := strings.Split(spec, ",")
-
-	var b, v, m, d string
-	switch len(f) {
-	case 1:
-		v = f[0]
-	case 2:
-		if isMac(f[1]) {
-			// vlan, mac
-			v, m = f[0], f[1]
-		} else if _, err := strconv.Atoi(f[0]); err == nil {
-			// vlan, driver
-			v, d = f[0], f[1]
-		} else {
-			// bridge, vlan
-			b, v = f[0], f[1]
-		}
-	case 3:
-		if isMac(f[2]) {
-			// bridge, vlan, mac
-			b, v, m = f[0], f[1], f[2]
-		} else if isMac(f[1]) {
-			// vlan, mac, driver
-			v, m, d = f[0], f[1], f[2]
-		} else {
-			// bridge, vlan, driver
-			b, v, d = f[0], f[1], f[2]
-		}
-	case 4:
-		b, v, m, d = f[0], f[1], f[2], f[3]
-	default:
-		err = errors.New("malformed netspec")
-		return
-	}
-
-	log.Debug("vm_net got b=%v, v=%v, m=%v, d=%v", b, v, m, d)
-
-	// VLAN ID, with optional bridge
-	vlan, err := strconv.Atoi(v) // the vlan id
-	if err != nil {
-		err = errors.New("malformed netspec, vlan must be an integer")
-		return
-	}
-
-	if m != "" && !isMac(m) {
-		err = errors.New("malformed netspec, invalid mac address: " + m)
-		return
-	}
-
-	// warn on valid but not allocated macs
-	if m != "" && !allocatedMac(m) {
-		log.Warn("unallocated mac address: %v", m)
-	}
-
-	if b == "" {
-		b = DEFAULT_BRIDGE
-	}
-	if d == "" {
-		d = VM_NET_DRIVER_DEFAULT
-	}
-
-	res = NetConfig{
-		VLAN:   vlan,
-		Bridge: b,
-		MAC:    strings.ToLower(m),
-		Driver: d,
-	}
-
-	return
+func vmNotAndroid(idOrName string) error {
+	return fmt.Errorf("vm not Android: %v", idOrName)
 }
 
-// Get the VM info from all hosts in the mesh. Callers must specify whether
-// they already hold the cmdLock or not. Returns a map where each key is a
-// hostname and the value is the VMs for that host.
-func globalVMs(hasLock bool) map[string]VMs {
-	if !hasLock {
-		cmdLock.Lock()
-		defer cmdLock.Unlock()
-	}
-
-	res := map[string]VMs{}
-
-	cmd := minicli.MustCompile("vm info")
-	cmd.Record = false
-
-	cmds := makeCommandHosts(meshageNode.BroadcastRecipients(), cmd)
-	cmds = append(cmds, cmd) // add local node
-
-	for resps := range processCommands(cmds...) {
-		for _, resp := range resps {
-			if resp.Error != "" {
-				log.Errorln(resp.Error)
-				continue
-			}
-
-			if vms, ok := resp.Data.(VMs); ok {
-				res[resp.Host] = vms
-			} else {
-				log.Error("unknown data field in vm info")
-			}
-		}
-	}
-
-	return res
+func isVmNotFound(err string) bool {
+	return strings.HasPrefix(err, "vm not found: ")
 }

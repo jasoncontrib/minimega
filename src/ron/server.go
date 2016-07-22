@@ -13,11 +13,26 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"version"
 )
+
+// GetCommand returns copy of a command by ID or nil if it doesn't exist
+func (s *Server) GetCommand(id int) *Command {
+	s.commandLock.Lock()
+	defer s.commandLock.Unlock()
+
+	log.Debug("ron GetCommand: %v", id)
+
+	if v, ok := s.commands[id]; ok {
+		return v.Copy()
+	}
+
+	return nil
+}
 
 // GetCommands returns a copy of the current command list
 func (s *Server) GetCommands() map[int]*Command {
@@ -27,20 +42,37 @@ func (s *Server) GetCommands() map[int]*Command {
 	defer s.commandLock.Unlock()
 
 	for k, v := range s.commands {
-		ret[k] = &Command{
-			ID:         v.ID,
-			Background: v.Background,
-			Command:    v.Command,
-			FilesSend:  v.FilesSend,
-			FilesRecv:  v.FilesRecv,
-			CheckedIn:  v.CheckedIn,
-			Filter:     v.Filter,
-		}
+		ret[k] = v.Copy()
 	}
 
 	log.Debug("ron GetCommands: %v", ret)
 
 	return ret
+}
+
+func (s *Server) GetProcesses(uuid string) ([]*Process, error) {
+	var p []*Process
+
+	s.clientLock.Lock()
+	defer s.clientLock.Unlock()
+
+	for _, c := range s.clients {
+		if c.UUID == uuid {
+			// ordered list of pids
+
+			var pids []int
+			for k, _ := range c.Processes {
+				pids = append(pids, k)
+			}
+			sort.Ints(pids)
+
+			for _, v := range pids {
+				p = append(p, c.Processes[v])
+			}
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("no client with uuid: %v", uuid)
 }
 
 // GetActiveClients returns a list of every active client
@@ -193,7 +225,7 @@ func (s *Server) clientHandler(conn io.ReadWriteCloser) {
 			}
 			err := enc.Encode(m)
 			if err != nil {
-				if err != io.EOF {
+				if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
 					log.Errorln(err)
 				}
 				s.removeClient(c.UUID)
@@ -206,7 +238,7 @@ func (s *Server) clientHandler(conn io.ReadWriteCloser) {
 		var m Message
 		err := dec.Decode(&m)
 		if err != nil {
-			if err != io.EOF {
+			if err != io.EOF && !strings.Contains(err.Error(), "connection reset by peer") {
 				log.Errorln(err)
 			}
 			s.removeClient(c.UUID)
@@ -333,9 +365,52 @@ func (s *Server) route(m *Message) {
 	defer s.clientLock.Unlock()
 
 	if m.UUID == "" {
-		// all clients
+		// send commands to all clients
 		for _, c := range s.clients {
-			c.out <- m
+			vm, ok := s.vms[c.UUID]
+			if !ok {
+				// The client is connected but not registered:
+				//  * client connected before it was registered
+				//  * client was unregistered before it disconnected
+				// Either way, we have to skip it since we doin't know what
+				// namespace it belongs to.
+
+				log.Error("unregistered client %v", m.UUID)
+				continue
+			}
+			cmds := map[int]*Command{}
+
+		cmdLoop:
+			for k, cmd := range m.Commands {
+				want := cmd.Filter.Namespace
+				got := vm.GetNamespace()
+
+				// filter commands by namespace
+				if want != "" && want != got {
+					continue
+				}
+
+				tags := vm.GetTags()
+
+				// filter commands by tags
+				for k, v := range cmd.Filter.Tags {
+					v2, ok := tags[k]
+
+					// if v is empty, tag must be set on VM
+					// otherwise, must match tag value on VM
+					if (v == "" && !ok) || v != v2 {
+						continue cmdLoop
+					}
+				}
+
+				cmds[k] = cmd
+			}
+
+			// clone message
+			m2 := *m
+			m2.Commands = cmds
+
+			c.out <- &m2
 		}
 	} else {
 		if c, ok := s.clients[m.UUID]; ok {
@@ -369,6 +444,7 @@ func (s *Server) responseHandler() {
 			c.IP = cin.IP
 			c.MAC = cin.MAC
 			c.Checkin = time.Now()
+			c.Processes = cin.Processes
 		} else {
 			log.Error("unknown client %v", cin.UUID)
 			s.clientLock.Unlock()
@@ -478,47 +554,18 @@ func (s *Server) clientReaper() {
 		t := time.Now()
 		s.clientLock.Lock()
 		for k, v := range s.clients {
-			if t.Sub(v.Checkin) > time.Duration(CLIENT_EXPIRED*time.Second) {
+			active := t.Sub(v.Checkin) > time.Duration(CLIENT_EXPIRED*time.Second)
+			if !active {
 				log.Debug("client %v expired", k)
 				go s.removeClient(k) // hack: put this in a goroutine to simplify locking
+			}
+
+			if vm, ok := s.vms[k]; ok {
+				vm.SetCCActive(active)
 			}
 		}
 		s.clientLock.Unlock()
 	}
-}
-
-// Return the list of currently connected serial ports. This does not indicate
-// which serial connections have active clients, simply which serial
-// connections the server is attached to.
-func (s *Server) GetActiveSerialPorts() []string {
-	s.serialLock.Lock()
-	defer s.serialLock.Unlock()
-
-	var ret []string
-	for k, _ := range s.serialConns {
-		ret = append(ret, k)
-	}
-
-	log.Debug("ron GetActiveSerialPorts: %v", ret)
-
-	return ret
-}
-
-// Return the list of currently listening UDS ports. This does not indicate
-// which connections have active clients, simply which connections the server
-// is attached to.
-func (s *Server) GetActiveUDSPorts() []string {
-	s.udsLock.Lock()
-	defer s.udsLock.Unlock()
-
-	var ret []string
-	for k, _ := range s.udsConns {
-		ret = append(ret, k)
-	}
-
-	log.Debug("ron GetActiveUDSPorts: %v", ret)
-
-	return ret
 }
 
 func (s *Server) CloseUDS(path string) error {
@@ -610,4 +657,18 @@ func (s *Server) DialSerial(path string) error {
 	}()
 
 	return nil
+}
+
+func (s *Server) RegisterVM(uuid string, f VM) {
+	s.clientLock.Lock()
+	defer s.clientLock.Unlock()
+
+	s.vms[uuid] = f
+}
+
+func (s *Server) UnregisterVM(uuid string) {
+	s.clientLock.Lock()
+	defer s.clientLock.Unlock()
+
+	delete(s.vms, uuid)
 }

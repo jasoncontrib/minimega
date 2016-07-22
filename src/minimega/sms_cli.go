@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"minicli"
 	log "minilog"
+	"errors"
 	"minimodem"
 	"os"
 	"strconv"
@@ -45,21 +46,10 @@ func init() {
 	registerHandlers("sms", smsCLIHandlers)
 }
 
-func cliSMS(c *minicli.Command) *minicli.Response {
-	resp := &minicli.Response{Host: hostname}
-
-	var vm *AndroidVM
-
-	if c.StringArgs["vm"] == "" {
-		// Don't need to do anything
-	} else if v := vms.findVm(c.StringArgs["vm"]); v == nil {
-		resp.Error = vmNotFound(c.StringArgs["vm"]).Error()
-		return resp
-	} else if vm2, ok := v.(*AndroidVM); !ok {
-		resp.Error = fmt.Sprintf("%v is not an Android VM", c.StringArgs["vm"])
-		return resp
-	} else {
-		vm = vm2
+func cliSMS(c *minicli.Command, resp *minicli.Response) error {
+	vm, err := vms.FindAndroidVM(c.StringArgs["vm"])
+	if err != nil && c.StringArgs["vm"] != "" {
+		return err
 	}
 
 	// TODO: Check errors?
@@ -73,10 +63,10 @@ func cliSMS(c *minicli.Command) *minicli.Response {
 		msgs := minimodem.NewMessage(from, vm.Modem.Number, message)
 		for _, msg := range msgs {
 			if err := vm.Modem.PushSMS(msg); err != nil {
-				resp.Error = fmt.Sprintf("error pushing message: %v", err)
-				return resp
+				return fmt.Errorf("error pushing message: %v", err)
 			}
 		}
+		return nil
 	} else if c.BoolArgs["history"] {
 		// List SMS history
 		resp.Header = []string{"VM", "Source", "Dest", "Time", "Message"}
@@ -101,44 +91,38 @@ func cliSMS(c *minicli.Command) *minicli.Response {
 				resp.Tabular = append(resp.Tabular, getRow(vm, m))
 			}
 		} else {
-			for _, vm := range vms {
-				if vm, ok := vm.(*AndroidVM); ok {
-					for _, m := range vm.Modem.Inbox {
-						resp.Tabular = append(resp.Tabular, getRow(vm, m))
-					}
+			for _, vm := range vms.FindAndroidVMs() {
+				for _, m := range vm.Modem.Inbox {
+					resp.Tabular = append(resp.Tabular, getRow(vm, m))
+				}
 
-					for _, m := range vm.Modem.Outbox {
-						resp.Tabular = append(resp.Tabular, getRow(vm, m))
-					}
+				for _, m := range vm.Modem.Outbox {
+					resp.Tabular = append(resp.Tabular, getRow(vm, m))
 				}
 			}
 		}
+		return nil
 	} else if c.BoolArgs["tap"] {
 		if c.BoolArgs["add"] {
 			low, err := normalizeNumber(c.StringArgs["low"])
 			if err != nil {
-				resp.Error = fmt.Sprintf("%v is not a valid number: %v", c.StringArgs["low"], err.Error())
-				return resp
+				return fmt.Errorf("%v is not a valid number: %v", c.StringArgs["low"], err.Error())
 			}
 			high, err := normalizeNumber(c.StringArgs["high"])
 			if err != nil {
-				resp.Error = fmt.Sprintf("%v is not a valid number: %v", c.StringArgs["high"], err.Error())
-				return resp
+				return fmt.Errorf("%v is not a valid number: %v", c.StringArgs["high"], err.Error())
 			}
 			filePath := c.StringArgs["file"]
 			file, err := os.Create(filePath)
 			if err != nil {
-				resp.Error = fmt.Sprintf("can't open file %v: %v", filePath, err.Error())
-				return resp
+				return fmt.Errorf("can't open file %v: %v", filePath, err.Error())
 			}
 			output := bufio.NewWriter(file)
 			if _, exists := smsHostTaps[filePath]; exists {
-				resp.Error = fmt.Sprintf("already a tap using file %v", filePath)
-				return resp
+				return fmt.Errorf("already a tap using file %v", filePath)
 			}
 
 			smsHostTaps[filePath] = hostTap{low, high, file, output}
-
 		} else if _, exists := c.BoolArgs["delete"]; exists {
 			filePath := c.StringArgs["file"]
 			isWild := filePath == Wildcard
@@ -161,17 +145,17 @@ func cliSMS(c *minicli.Command) *minicli.Response {
 				})
 			}
 		}
+		return nil
 	} else if c.BoolArgs["deliver"] {
 		log.Debug("delivering message to %d: `%s`", to, message)
 
-		for _, vm := range vms {
-			if vm, ok := vm.(*AndroidVM); ok && vm.Modem.Number == to {
+		for _, vm := range vms.FindAndroidVMs() {
+			if vm.Modem.Number == to {
 				log.Debug("found %d at vm id %d", to, vm.GetID())
 				msgs := minimodem.NewMessage(from, vm.Modem.Number, message)
 				for _, msg := range msgs {
 					if err := vm.Modem.PushSMS(msg); err != nil {
-						resp.Error = fmt.Sprintf("error pushing message to %v: %v", vm.GetID(), err)
-						return resp
+						return fmt.Errorf("error pushing message to %v: %v", vm.GetID(), err)
 					}
 				}
 			}
@@ -187,7 +171,7 @@ func cliSMS(c *minicli.Command) *minicli.Response {
 				}
 			}
 		}
-
+		return nil
 	} else if c.BoolArgs["deliver-raw"] {
 		log.Debug("deliver-raw message command initiated")
 		raw := c.StringArgs["raw"]
@@ -195,17 +179,15 @@ func cliSMS(c *minicli.Command) *minicli.Response {
 		msg, err := minimodem.EatMessage(raw)
 		if err != nil {
 			log.Debug(fmt.Sprintf("errored while eating raw message: %v", err))
-			resp.Error = fmt.Sprintf("can't convert raw %v to message: %v", raw, err)
-			return resp
+			return fmt.Errorf("can't convert raw %v to message: %v", raw, err)
 		}
 		log.Debug(fmt.Sprintf("ate raw message to %d: %v", msg.Dst, msg))
 
-		for _, vm := range vms {
-			if vm, ok := vm.(*AndroidVM); ok && vm.Modem.Number == msg.Dst {
+		for _, vm := range vms.FindAndroidVMs() {
+			if vm.Modem.Number == msg.Dst {
 				log.Debug("found %d at vm id %d", msg.Dst, vm.GetID())
 				if err = vm.Modem.PushSMS(msg); err != nil {
-					resp.Error = fmt.Sprintf("error pushing message to %v: %v", vm.GetID(), err)
-					return resp
+					return fmt.Errorf("error pushing message to %v: %v", vm.GetID(), err)
 				}
 			}
 		}
@@ -220,35 +202,32 @@ func cliSMS(c *minicli.Command) *minicli.Response {
 				}
 			}
 		}
+		return nil
 	} else if c.BoolArgs["lookup"] {
 		ids := []int{}
 
-		for _, vm := range vms {
-			if vm, ok := vm.(*AndroidVM); ok && vm.Modem.Number == to {
+		for _, vm := range vms.FindAndroidVMs() {
+			if vm.Modem.Number == to {
 				log.Debug("found %d at vm id %d", to, vm.GetID())
 				ids = append(ids, vm.GetID())
 			}
 		}
 
 		resp.Response = fmt.Sprintf("%v", ids)
-	} else {
-		resp.Error = "no sms command specified"
+		return nil
 	}
-
-	return resp
+	return errors.New("no sms command specified")
 }
 
-func cliSMSClear(c *minicli.Command) *minicli.Response {
-	resp := &minicli.Response{Host: hostname}
-
+func cliSMSClear(c *minicli.Command, resp *minicli.Response) error {
 	vm := c.StringArgs["range"]
 	if vm == "" {
 		vm = Wildcard
 	}
 
 	if err := smsClear(vm); err != nil {
-		resp.Error = err.Error()
+		return err
 	}
 
-	return resp
+	return nil
 }

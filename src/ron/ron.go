@@ -9,6 +9,7 @@ import (
 	log "minilog"
 	"minitunnel"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -39,6 +40,7 @@ type Server struct {
 	commandCounterLock sync.Mutex
 	clients            map[string]*Client // map of active clients, each of which have a running handler
 	clientLock         sync.Mutex
+	vms                map[string]VM // map of uuid -> VM
 	in                 chan *Message // incoming message queue, consumed by the mux
 	path               string        // path for serving files
 	lastBroadcast      time.Time     // watchdog time of last command list broadcast
@@ -64,15 +66,33 @@ type Client struct {
 	IP       []string
 	MAC      []string
 
+	Namespace string
+	Tags      map[string]string
+
+	Processes   map[int]*Process // list of processes backgrounded (cc background in minimega)
+	processLock sync.Mutex
+
 	Version string
 
-	Responses     []*Response   // response queue, consumed and cleared by the heartbeat
-	Commands      chan *Command // ordered list of commands to be processed by the client
-	responseLock  sync.Mutex
+	Responses    []*Response // response queue, consumed and cleared by the heartbeat
+	responseLock sync.Mutex
+
 	commands      chan map[int]*Command // unordered, unfiltered list of incoming commands from the server
 	lastHeartbeat time.Time             // last heartbeat watchdog time
 	files         chan *Message         // incoming files sent by the server and requested by GetFile()
 	hold          sync.Mutex            // held while attempting to redial to prevent heartbeats, otherwise they get stacked
+}
+
+type Process struct {
+	PID     int
+	Command []string
+	process *os.Process
+}
+
+type VM interface {
+	GetNamespace() string
+	GetTags() map[string]string
+	SetCCActive(bool)
 }
 
 type Message struct {
@@ -93,6 +113,7 @@ func NewServer(port int, path string) (*Server, error) {
 		udsConns:      make(map[string]net.Listener),
 		commands:      make(map[int]*Command),
 		clients:       make(map[string]*Client),
+		vms:           make(map[string]VM),
 		path:          path,
 		in:            make(chan *Message, 1024),
 		lastBroadcast: time.Now(),
@@ -121,10 +142,10 @@ func NewClient(family string, port int, parent, serial, path string) (*Client, e
 		path:          path,
 		in:            make(chan *Message, 1024),
 		out:           make(chan *Message, 1024),
-		Commands:      make(chan *Command, 1024),
 		commands:      make(chan map[int]*Command, 1024),
 		lastHeartbeat: time.Now(),
 		files:         make(chan *Message, 1024),
+		Processes:     make(map[int]*Process),
 	}
 
 	if serial != "" {

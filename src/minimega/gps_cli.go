@@ -5,7 +5,7 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"math"
 	"math/rand"
 	"minicli"
@@ -68,80 +68,50 @@ func init() {
 	registerHandlers("gps", gpsCLIHandlers)
 }
 
-func cliGPS(c *minicli.Command) *minicli.Response {
-	resp := &minicli.Response{Host: hostname}
-
-	var vm *AndroidVM
-	var err error
-
-	if v := vms.findVm(c.StringArgs["vm"]); v == nil {
-		resp.Error = vmNotFound(c.StringArgs["vm"]).Error()
-		return resp
-	} else if vm2, ok := v.(*AndroidVM); !ok {
-		resp.Error = fmt.Sprintf("%v is not an Android VM", c.StringArgs["vm"])
-		return resp
-	} else {
-		vm = vm2
+func cliGPS(c *minicli.Command, resp *minicli.Response) error {
+	vm, err := vms.FindAndroidVM(c.StringArgs["vm"])
+	if err != nil {
+		return err
 	}
 
 	if c.BoolArgs["push"] {
 		lat, err := strconv.ParseFloat(c.StringArgs["lat"], 64)
 		if err != nil {
-			resp.Error = "lat must be a float"
-			return resp
+			return errors.New("lat must be a float")
 		}
 		long, err := strconv.ParseFloat(c.StringArgs["long"], 64)
 		if err != nil {
-			resp.Error = "long must be a float"
-			return resp
+			return errors.New("long must be a float")
 		}
 
 		var accuracy float64 = 1.0 // best
 		if c.StringArgs["accuracy"] != "" {
 			accuracy, err = strconv.ParseFloat(c.StringArgs["accuracy"], 64)
 			if err != nil {
-				resp.Error = "accuracy must be a float"
-				return resp
+				return errors.New("accuracy must be a float")
 			}
 		}
 
 		nmea := toNMEAString(lat, long, accuracy)
 
-		err = vm.PushGPS(nmea)
+		return vm.PushGPS(nmea)
 	} else if c.BoolArgs["push-raw"] {
-		err = vm.PushGPS(c.StringArgs["raw"])
-	} else {
-		log.Fatal("invalid pattern matched")
+		return vm.PushGPS(c.StringArgs["raw"])
 	}
 
-	if err != nil {
-		resp.Error = err.Error()
-	}
-
-	return resp
+	return errors.New("unreachable")
 }
 
-func cliGPSWander(c *minicli.Command) *minicli.Response {
-	resp := &minicli.Response{Host: hostname}
-
-	var vm *AndroidVM
-
-	// Get the VM
-	if v := vms.findVm(c.StringArgs["vm"]); v == nil {
-		resp.Error = vmNotFound(c.StringArgs["vm"]).Error()
-		return resp
-	} else if vm2, ok := v.(*AndroidVM); !ok {
-		resp.Error = fmt.Sprintf("%v is not an Android VM", c.StringArgs["vm"])
-		return resp
-	} else {
-		vm = vm2
+func cliGPSWander(c *minicli.Command, resp *minicli.Response) error {
+	vm, err := vms.FindAndroidVM(c.StringArgs["vm"])
+	if err != nil {
+		return err
 	}
 
 	// Check if we're walking, driving, or stopping
 	if c.BoolArgs["stop"] {
 		// Set movement speed to zero and return
 		vm.moveSpeed = 0.0
-		return resp
 	} else if c.BoolArgs["walking"] {
 		// Set the speed to a walking pace
 		vm.moveSpeed = 0.000007
@@ -150,23 +120,22 @@ func cliGPSWander(c *minicli.Command) *minicli.Response {
 		vm.moveSpeed = 0.0001
 	}
 
-	return resp
+	return nil
 }
 
 func gpsMove() {
 	for {
-		for _, vm := range vms.findVmsByType(Android) {
-			a := vm.(*AndroidVM)
-			if a.GetState() != VM_RUNNING {
+		for _, vm := range vms.FindAndroidVMs() {
+			if vm.GetState() != VM_RUNNING {
 				continue
 			}
-			if a.moveSpeed == 0.0 {
+			if vm.moveSpeed == 0.0 {
 				// this one isn't moving
 				continue
 			}
 			// Check if we're close enough to the destination
-			if closeEnough(a.destinationLocation, a.currentLocation) || (a.destinationLocation.lat == 0 && a.destinationLocation.long == 0) {
-				log.Info("VM %v reached its destination %v.", a.GetName(), a.destinationLocation)
+			if closeEnough(vm.destinationLocation, vm.currentLocation) || (vm.destinationLocation.lat == 0 && vm.destinationLocation.long == 0) {
+				log.Info("VM %v reached its destination %v.", vm.GetName(), vm.destinationLocation)
 				// If so, pick a new destinationLocation within ~15km of the origin
 				// TODO: make the radius more intelligent
 				// 1. Choose a random Δlat & Δlong of up to 0.1
@@ -183,34 +152,34 @@ func gpsMove() {
 				}
 
 				// Set the new destinationLocation
-				a.destinationLocation = location{lat: a.originLocation.lat + Δlat, long: a.originLocation.long + Δlong}
-				log.Info("VM %v new destination is %v", a.GetName(), a.destinationLocation)
+				vm.destinationLocation = location{lat: vm.originLocation.lat + Δlat, long: vm.originLocation.long + Δlong}
+				log.Info("VM %v new destination is %v", vm.GetName(), vm.destinationLocation)
 			}
 
 			// Move toward the destination point
 			// Calculate Δlat and Δlong
 			var Δlat, Δlong float64
-			if diff := a.destinationLocation.lat - a.currentLocation.lat; math.Abs(diff) < a.moveSpeed {
+			if diff := vm.destinationLocation.lat - vm.currentLocation.lat; math.Abs(diff) < vm.moveSpeed {
 				Δlat = diff
 			} else {
-				Δlat = a.moveSpeed
-				if a.destinationLocation.lat < a.currentLocation.lat {
+				Δlat = vm.moveSpeed
+				if vm.destinationLocation.lat < vm.currentLocation.lat {
 					Δlat *= -1
 				}
 			}
-			if diff := a.destinationLocation.long - a.currentLocation.long; math.Abs(diff) < a.moveSpeed {
+			if diff := vm.destinationLocation.long - vm.currentLocation.long; math.Abs(diff) < vm.moveSpeed {
 				Δlong = diff
 			} else {
-				Δlong = a.moveSpeed
-				if a.destinationLocation.long < a.currentLocation.long {
+				Δlong = vm.moveSpeed
+				if vm.destinationLocation.long < vm.currentLocation.long {
 					Δlong *= -1
 				}
 			}
 
 			// Update currentLocation
-			a.currentLocation.lat += Δlat
-			a.currentLocation.long += Δlong
-			log.Info("VM %v moved to point %v", a.GetName(), a.currentLocation)
+			vm.currentLocation.lat += Δlat
+			vm.currentLocation.long += Δlong
+			log.Info("VM %v moved to point %v", vm.GetName(), vm.currentLocation)
 		}
 		updateAccessPointsVisible()
 		time.Sleep(1 * time.Second)

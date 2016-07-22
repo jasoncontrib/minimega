@@ -18,7 +18,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -33,12 +32,14 @@ import (
 	"sync"
 	"syscall"
 	"text/tabwriter"
+	"time"
 	"unsafe"
 )
 
 const (
-	CONTAINER_MAGIC = "CONTAINER"
-	CONTAINER_NONE  = "CONTAINER_NONE"
+	CONTAINER_MAGIC        = "CONTAINER"
+	CONTAINER_NONE         = "CONTAINER_NONE"
+	CONTAINER_KILL_TIMEOUT = 5 * time.Second
 )
 
 const (
@@ -212,6 +213,7 @@ type ContainerConfig struct {
 	FSPath   string
 	Hostname string
 	Init     []string
+	Preinit  string
 	Fifos    int
 }
 
@@ -225,15 +227,6 @@ type ContainerVM struct {
 	netns         string
 }
 
-type ContainerIniter struct {
-	// Guards
-	once sync.Once
-
-	Success bool
-}
-
-var ContainerInit ContainerIniter
-
 // Ensure that ContainerVM implements the VM interface
 var _ VM = (*ContainerVM)(nil)
 
@@ -246,17 +239,21 @@ func init() {
 	CGROUP_PATH = filepath.Join(CGROUP_ROOT, "minimega")
 }
 
-func (c *ContainerIniter) Init() {
-	c.once.Do(func() {
-		if err := c.init(); err != nil {
-			log.Errorln(err)
-		} else {
-			c.Success = true
-		}
-	})
-}
+var (
+	containerInitLock    sync.Mutex
+	containerInitOnce    bool
+	containerInitSuccess bool
+)
 
-func (_ ContainerIniter) init() error {
+func containerInit() error {
+	containerInitLock.Lock()
+	defer containerInitLock.Unlock()
+
+	if containerInitOnce {
+		return nil
+	}
+	containerInitOnce = true
+
 	// mount our own cgroup namespace to avoid having to ever ever ever
 	// deal with systemd
 	log.Debug("cgroup mkdir: %v", CGROUP_ROOT)
@@ -281,23 +278,32 @@ func (_ ContainerIniter) init() error {
 		return fmt.Errorf("setting use_hierarchy: %v", err)
 	}
 
+	// clean potentially old cgroup noise
+	err = containerCleanCgroupDirs()
+	if err != nil {
+		return err
+	}
+
 	// create a minimega cgroup
 	err = os.MkdirAll(CGROUP_PATH, 0755)
 	if err != nil {
 		return fmt.Errorf("creating minimega cgroup: %v", err)
 	}
 
+	containerInitSuccess = true
 	return nil
 }
 
 func containerTeardown() {
-	if ContainerInit.Success {
-		err := os.Remove(CGROUP_PATH)
-		if err != nil {
+	err := os.Remove(CGROUP_PATH)
+	if err != nil {
+		if containerInitSuccess {
 			log.Errorln(err)
 		}
-		err = syscall.Unmount(CGROUP_ROOT, 0)
-		if err != nil {
+	}
+	err = syscall.Unmount(CGROUP_ROOT, 0)
+	if err != nil {
+		if containerInitSuccess {
 			log.Errorln(err)
 		}
 	}
@@ -335,10 +341,11 @@ func containerTeardown() {
 //	6 :  memory in megabytes
 //	7 :  uuid
 //	8 :  number of fifos
-//	9 :  init program (relative to filesystem path)
-//	10:  init args
+//	9 :  preinit program
+//	10:  init program (relative to filesystem path)
+//	11:  init args
 func containerShim() {
-	if len(os.Args) < 10 { // 10 because init args can be nil
+	if len(os.Args) < 11 { // 11 because init args can be nil
 		os.Exit(1)
 	}
 
@@ -382,7 +389,8 @@ func containerShim() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	vmInit := os.Args[9:]
+	vmPreinit := os.Args[9]
+	vmInit := os.Args[10:]
 
 	// set hostname
 	log.Debug("vm %v hostname", vmID)
@@ -419,6 +427,18 @@ func containerShim() {
 	err = containerPtmx(vmFSPath)
 	if err != nil {
 		log.Fatal("containerPtmx: %v", err)
+	}
+
+	// preinit
+	if vmPreinit != CONTAINER_NONE {
+		log.Debug("preinit: %v", vmPreinit)
+		out, err := exec.Command(vmPreinit, vmPreinit).CombinedOutput()
+		if err != nil {
+			log.Fatal("containerPreinit: %v: %v", err, string(out))
+		}
+		if len(out) != 0 {
+			log.Debug("containerPreinit: %v", string(out))
+		}
 	}
 
 	// symlinks
@@ -546,11 +566,9 @@ func containerFifos(vmFSPath string, vmInstancePath string, vmFifos int) error {
 }
 
 // Copy makes a deep copy and returns reference to the new struct.
-func (old *ContainerConfig) Copy() *ContainerConfig {
-	res := new(ContainerConfig)
-
+func (old ContainerConfig) Copy() ContainerConfig {
 	// Copy all fields
-	*res = *old
+	res := old
 
 	// Make deep copy of slices
 	// none yet - placeholder
@@ -565,33 +583,21 @@ func (vm *ContainerVM) Config() *BaseConfig {
 func NewContainer(name string) *ContainerVM {
 	vm := new(ContainerVM)
 
-	vm.BaseVM = *NewVM(name)
+	vm.BaseVM = *NewBaseVM(name)
 	vm.Type = CONTAINER
 
-	vm.ContainerConfig = *vmConfig.ContainerConfig.Copy() // deep-copy configured fields
+	vm.ContainerConfig = vmConfig.ContainerConfig.Copy() // deep-copy configured fields
 
 	return vm
 }
 
-func (vm *ContainerVM) Launch(ack chan int) error {
-	go vm.launch(ack)
+func (vm *ContainerVM) Launch() error {
+	defer vm.lock.Unlock()
 
-	return nil
+	return vm.launch()
 }
 
 func (vm *ContainerVM) Start() (err error) {
-	// Update the state after the lock has been released
-	defer func() {
-		if err != nil {
-			vm.setState(VM_ERROR)
-		} else {
-			// launch() may have put the vm in the error state, don't change that
-			if vm.GetState() != VM_ERROR {
-				vm.setState(VM_RUNNING)
-			}
-		}
-	}()
-
 	vm.lock.Lock()
 	defer vm.lock.Unlock()
 
@@ -605,40 +611,37 @@ func (vm *ContainerVM) Start() (err error) {
 		// Create a new channel since we closed the other one to indicate that
 		// the VM should quit.
 		vm.kill = make(chan bool)
-		ack := make(chan int)
 
-		go vm.launch(ack)
-
-		// Unlock so that launch can do its thing. We will block on receiving
-		// on the ack channel so that we know when launch has finished and it's
-		// okay to reaquire the lock.
-		vm.lock.Unlock()
-		log.Debug("ack restarted VM %v", <-ack)
-		vm.lock.Lock()
+		// Launch handles setting the VM to error state
+		if err := vm.launch(); err != nil {
+			return err
+		}
 	}
 
 	log.Info("starting VM: %v", vm.ID)
-
-	freezer := filepath.Join(CGROUP_PATH, fmt.Sprintf("%v", vm.ID), "freezer.state")
-	err = ioutil.WriteFile(freezer, []byte("THAWED"), 0644)
-	if err != nil {
+	if err := vm.thaw(); err != nil {
 		log.Errorln(err)
+		vm.setError(err)
 		return err
 	}
+
+	vm.setState(VM_RUNNING)
 
 	return nil
 }
 
 func (vm *ContainerVM) Stop() error {
-	if vm.GetState() != VM_RUNNING {
-		return fmt.Errorf("VM %v not running", vm.ID)
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	if vm.State != VM_RUNNING {
+		return vmNotRunning(strconv.Itoa(vm.ID))
 	}
 
 	log.Info("stopping VM: %v", vm.ID)
-
-	freezer := filepath.Join(CGROUP_PATH, fmt.Sprintf("%v", vm.ID), "freezer.state")
-	err := ioutil.WriteFile(freezer, []byte("FROZEN"), 0644)
-	if err != nil {
+	if err := vm.freeze(); err != nil {
+		log.Errorln(err)
+		vm.setError(err)
 		return err
 	}
 
@@ -672,143 +675,56 @@ func (vm *ContainerConfig) String() string {
 	w.Init(&o, 5, 0, 1, ' ', 0)
 	fmt.Fprintln(&o, "Current container configuration:")
 	fmt.Fprintf(w, "Filesystem Path:\t%v\n", vm.FSPath)
+	fmt.Fprintf(w, "Hostname:\t%v\n", vm.Hostname)
+	fmt.Fprintf(w, "Init:\t%v\n", vm.Init)
+	fmt.Fprintf(w, "Pre-init:\t%v\n", vm.Preinit)
+	fmt.Fprintf(w, "FIFOs:\t%v\n", vm.Fifos)
 	w.Flush()
 	fmt.Fprintln(&o)
 	return o.String()
 }
 
-func (vm *ContainerVM) launchPreamble(ack chan int) error {
-	// check if the vm has a conflict with the disk or mac address of another vm
-	// build state of currently running system
-	macMap := map[string]bool{}
-	selfMacMap := map[string]bool{}
-	diskSnapshotted := map[string]bool{}
-	diskPersistent := map[string]bool{}
-
-	vmLock.Lock()
-	defer vmLock.Unlock()
-
-	err := os.MkdirAll(vm.instancePath, os.FileMode(0700))
-	if err != nil {
-		log.Errorln(err)
-		teardown()
-	}
-
-	// populate selfMacMap
-	for _, net := range vm.Networks {
-		if net.MAC == "" { // don't worry about empty mac addresses
-			continue
-		}
-
-		if _, ok := selfMacMap[net.MAC]; ok {
-			// if this vm specified the same mac address for two interfaces
-			return fmt.Errorf("Cannot specify the same mac address for two interfaces")
-		}
-		selfMacMap[net.MAC] = true
-	}
-
-	// populate macMap, diskSnapshotted, and diskPersistent
-	for _, vm2 := range vms {
-		if vm == vm2 { // ignore this vm
-			continue
-		}
-
-		// populate mac addresses set
-		for _, net := range vm2.Config().Networks {
-			macMap[net.MAC] = true
-		}
-
-		if vm2, ok := vm2.(*ContainerVM); ok {
-			// populate disk sets
-			if vm2.Snapshot {
-				diskSnapshotted[vm2.FSPath] = true
-			} else {
-				diskPersistent[vm2.FSPath] = true
-			}
-
-		}
-	}
-
-	// check for mac address conflicts and fill in unspecified mac addresses without conflict
-	for i := range vm.Networks {
-		net := &vm.Networks[i]
-
-		if net.MAC == "" { // create mac addresses where unspecified
-			existsOther, existsSelf, newMac := true, true, "" // entry condition/initialization
-			for existsOther || existsSelf {                   // loop until we generate a random mac that doesn't conflict (already exist)
-				newMac = randomMac()               // generate a new mac address
-				_, existsOther = macMap[newMac]    // check it against the set of mac addresses from other vms
-				_, existsSelf = selfMacMap[newMac] // check it against the set of mac addresses specified from this vm
-			}
-
-			net.MAC = newMac          // set the unspecified mac address
-			selfMacMap[newMac] = true // add this mac to the set of mac addresses for this vm
-		}
-	}
-
-	// check for disk conflict
-	_, existsSnapshotted := diskSnapshotted[vm.FSPath]                   // check if another vm is using this disk in snapshot mode
-	_, existsPersistent := diskPersistent[vm.FSPath]                     // check if another vm is using this disk in persistent mode (snapshot=false)
-	if existsPersistent || (vm.Snapshot == false && existsSnapshotted) { // if we have a disk conflict
-		return fmt.Errorf("disk path %v is already in use by another vm.", vm.FSPath)
-	}
-
-	return nil
-}
-
-func (vm *ContainerVM) launch(ack chan int) (err error) {
+// launch is the low-level launch function for Container VMs. The caller should
+// hold the VM's lock.
+func (vm *ContainerVM) launch() error {
 	log.Info("launching vm: %v", vm.ID)
 
-	// Update the state after the lock has been released
-	defer func() {
-		if err != nil {
-			vm.setState(VM_ERROR)
-
-			// Only ACK for failures since, on success, launch may block
-			ack <- vm.ID
-		} else {
-			vm.setState(VM_BUILDING)
-		}
-	}()
-
-	vm.lock.Lock()
-	defer vm.lock.Unlock()
-
-	ContainerInit.Init()
-	if !ContainerInit.Success {
-		err = errors.New("cannot launch container VMs -- cgroups failed to initialize")
+	err := containerInit()
+	if err != nil {
 		log.Errorln(err)
-		return
+		vm.setError(err)
+		return err
+	}
+	if !containerInitSuccess {
+		err = fmt.Errorf("cgroups are not initialized, cannot continue")
+		log.Errorln(err)
+		vm.setError(err)
+		return err
 	}
 
-	s := vm.State
-	restart := s == VM_QUIT || s == VM_ERROR
+	// If this is the first time launching the VM, do the final configuration
+	// check, create a directory for it, and setup the FS.
+	if vm.State == VM_BUILDING {
+		ccNode.RegisterVM(vm.UUID, vm)
 
-	// don't repeat the preamble if we're just in the quit state
-	if s != VM_QUIT {
-		if err = vm.launchPreamble(ack); err != nil {
-			log.Errorln(err)
-			return
+		if err := os.MkdirAll(vm.instancePath, os.FileMode(0700)); err != nil {
+			teardownf("unable to create VM dir: %v", err)
+		}
+
+		if vm.Snapshot {
+			if err := vm.overlayMount(); err != nil {
+				log.Error("overlayMount: %v", err)
+				vm.setError(err)
+				return err
+			}
+		} else {
+			vm.effectivePath = vm.FSPath
 		}
 	}
 
 	// write the config for this vm
 	writeOrDie(filepath.Join(vm.instancePath, "config"), vm.Config().String())
 	writeOrDie(filepath.Join(vm.instancePath, "name"), vm.Name)
-
-	var waitChan = make(chan int)
-
-	if !restart {
-		if vm.Snapshot {
-			err = vm.overlayMount()
-			if err != nil {
-				log.Error("overlayMount: %v", err)
-				return
-			}
-		} else {
-			vm.effectivePath = vm.FSPath
-		}
-	}
 
 	// the child process will communicate with a fake console using pipes
 	// to mimic stdio, and a fourth pipe for logging before the child execs
@@ -818,32 +734,38 @@ func (vm *ContainerVM) launch(ack chan int) (err error) {
 	parentLog, childLog, err := os.Pipe()
 	if err != nil {
 		log.Error("pipe: %v", err)
-		return
+		vm.setError(err)
+		return err
 	}
 	childStdin, parentStdin, err := os.Pipe()
 	if err != nil {
 		log.Error("pipe: %v", err)
-		return
+		vm.setError(err)
+		return err
 	}
 	parentStdout, childStdout, err := os.Pipe()
 	if err != nil {
 		log.Error("pipe: %v", err)
-		return
+		vm.setError(err)
+		return err
 	}
 	parentStderr, childStderr, err := os.Pipe()
 	if err != nil {
 		log.Error("pipe: %v", err)
-		return
+		vm.setError(err)
+		return err
 	}
 	parentSync1, childSync1, err := os.Pipe()
 	if err != nil {
 		log.Error("pipe: %v", err)
-		return
+		vm.setError(err)
+		return err
 	}
 	childSync2, parentSync2, err := os.Pipe()
 	if err != nil {
 		log.Error("pipe: %v", err)
-		return
+		vm.setError(err)
+		return err
 	}
 
 	// create the uuid path that will bind mount into sysfs in the
@@ -854,10 +776,10 @@ func (vm *ContainerVM) launch(ack chan int) (err error) {
 	// create fifos
 	for i := 0; i < vm.Fifos; i++ {
 		p := filepath.Join(vm.instancePath, fmt.Sprintf("fifo%v", i))
-		err = syscall.Mkfifo(p, 0660)
-		if err != nil {
+		if err = syscall.Mkfifo(p, 0660); err != nil {
 			log.Error("fifo: %v", err)
-			return
+			vm.setError(err)
+			return err
 		}
 	}
 
@@ -876,6 +798,10 @@ func (vm *ContainerVM) launch(ack chan int) (err error) {
 	if hn == "" {
 		hn = CONTAINER_NONE
 	}
+	preinit := vm.Preinit
+	if preinit == "" {
+		preinit = CONTAINER_NONE
+	}
 	args := []string{
 		os.Args[0],
 		CONTAINER_MAGIC,
@@ -886,6 +812,7 @@ func (vm *ContainerVM) launch(ack chan int) (err error) {
 		vm.Memory,
 		uuidPath,
 		fmt.Sprintf("%v", vm.Fifos),
+		preinit,
 	}
 	args = append(args, vm.Init...)
 
@@ -893,8 +820,6 @@ func (vm *ContainerVM) launch(ack chan int) (err error) {
 	cmd := &exec.Cmd{
 		Path: "/proc/self/exe",
 		Args: args,
-		Env:  nil,
-		Dir:  "",
 		ExtraFiles: []*os.File{
 			childLog,
 			childSync1,
@@ -907,11 +832,12 @@ func (vm *ContainerVM) launch(ack chan int) (err error) {
 			Cloneflags: uintptr(CONTAINER_FLAGS),
 		},
 	}
-	err = cmd.Start()
-	if err != nil {
+
+	if err = cmd.Start(); err != nil {
 		vm.overlayUnmount()
 		log.Error("start container: %v", err)
-		return
+		vm.setError(err)
+		return err
 	}
 
 	vm.pid = cmd.Process.Pid
@@ -923,189 +849,184 @@ func (vm *ContainerVM) launch(ack chan int) (err error) {
 
 	go vm.console(parentStdin, parentStdout, parentStderr)
 
-	go func() {
-		err := cmd.Wait()
-		vm.setState(VM_QUIT)
-		if err != nil {
-			if err.Error() != "signal: killed" { // because we killed it
-				log.Error("kill container: %v", err)
-				vm.setState(VM_ERROR)
-			}
-		}
-		waitChan <- vm.ID
-	}()
-
-	// we can't just return on error at this point because we'll
-	// leave dangling goroutines, we have to clean up on failure
-	success := true
-	sendKillAck := false
-
 	// TODO: add affinity funcs for containers
 	// vm.CheckAffinity()
 
 	// network creation for containers happens /after/ the container is
-	// started, as we need the PID in order to attach a veth to the
-	// container side of the network namespace.
-	// That means that unlike kvm vms, we MUST create/destroy taps on
-	// launch/kill boundaries (kvm destroys taps on flush).
+	// started, as we need the PID in order to attach a veth to the container
+	// side of the network namespace. That means that unlike kvm vms, we MUST
+	// create/destroy taps on launch/kill boundaries (kvm destroys taps on
+	// flush).
 
 	// create and add taps if we are associated with any networks
 	// expose the network namespace to iptool
-	err = vm.symlinkNetns()
-	if err != nil {
+	if err = vm.symlinkNetns(); err != nil {
 		log.Error("symlinkNetns: %v", err)
-		vm.State = VM_ERROR
-		cmd.Process.Kill()
-		<-waitChan
-		success = false
 	}
 
-	if success {
+	if err == nil {
 		for i := range vm.Networks {
 			net := &vm.Networks[i]
+			var b *Bridge
 
-			b, err := getBridge(net.Bridge)
+			b, err = getBridge(net.Bridge)
 			if err != nil {
 				log.Error("get bridge: %v", err)
-				vm.State = VM_ERROR
-				cmd.Process.Kill()
-				<-waitChan
-				success = false
 				break
 			}
 
 			net.Tap, err = b.ContainerTapCreate(net.Tap, net.VLAN, vm.netns, net.MAC, i)
 			if err != nil {
-				log.Error("create tap: %v", err)
-				vm.State = VM_ERROR
-				cmd.Process.Kill()
-				<-waitChan
-				success = false
 				break
 			}
 
 			updates := make(chan ipmac.IP)
-			go func(vm *ContainerVM, net *NetConfig) {
-				defer close(updates)
-				for {
-					// TODO: need to acquire VM lock?
-					select {
-					case update := <-updates:
-						if update.IP4 != "" {
-							net.IP4 = update.IP4
-						} else if update.IP6 != "" && !strings.HasPrefix(update.IP6, "fe80") {
-							net.IP6 = update.IP6
-						}
-					case <-vm.kill:
-						b.iml.DelMac(net.MAC)
-						return
-					}
-				}
-			}(vm, net)
+			go vm.macSnooper(net, updates)
 
 			b.iml.AddMac(net.MAC, updates)
 		}
 	}
 
-	if success {
-		if len(vm.Networks) > 0 {
-			taps := []string{}
-			for _, net := range vm.Networks {
-				taps = append(taps, net.Tap)
-			}
-
-			err := ioutil.WriteFile(filepath.Join(vm.instancePath, "taps"), []byte(strings.Join(taps, "\n")), 0666)
-			if err != nil {
-				log.Error("write instance taps file: %v", err)
-				vm.State = VM_ERROR
-				cmd.Process.Kill()
-				<-waitChan
-				success = false
-			}
+	if err == nil && len(vm.Networks) > 0 {
+		if err = vm.writeTaps(); err != nil {
+			log.Errorln(err)
 		}
 	}
 
 	childSync1.Close()
-	if success {
+	if err == nil {
 		// wait for the freezer notification
 		var buf = make([]byte, 1)
 		parentSync1.Read(buf)
-		freezer := filepath.Join(CGROUP_PATH, fmt.Sprintf("%v", vm.ID), "freezer.state")
-		err = ioutil.WriteFile(freezer, []byte("FROZEN"), 0644)
-		if err != nil {
-			log.Error("freezer: %v", err)
-			vm.State = VM_ERROR
-			cmd.Process.Kill()
-			<-waitChan
-			success = false
-		}
+
+		err = vm.freeze()
+
 		parentSync2.Close()
 	} else {
 		parentSync1.Close()
 		parentSync2.Close()
 	}
 
-	// connect cc
 	ccPath := filepath.Join(vm.effectivePath, "cc")
-	err = ccNode.ListenUnix(ccPath)
+
+	if err == nil {
+		// connect cc. Note that we have a local err here because we don't want
+		// to prevent the VM from continuing to launch, even if we can't
+		// connect to cc.
+		if err := ccNode.ListenUnix(ccPath); err != nil {
+			log.Warn("unable to connect to cc for vm %v: %v", vm.ID, err)
+		}
+	}
+
 	if err != nil {
-		log.Errorln(err)
+		// Some error occurred.. clean up the process
+		cmd.Process.Kill()
+
+		vm.setError(err)
+		return err
 	}
 
-	ack <- vm.ID
+	go func() {
+		var err error
+		cgroupPath := filepath.Join(CGROUP_PATH, fmt.Sprintf("%v", vm.ID))
+		sendKillAck := false
 
-	if success {
+		// Channel to signal when the process has exited
+		var waitChan = make(chan bool)
+
+		// Create goroutine to wait for process to exit
 		go func() {
-			select {
-			case <-waitChan:
-				log.Info("VM %v exited", vm.ID)
-			case <-vm.kill:
-				log.Info("Killing VM %v", vm.ID)
-				cmd.Process.Kill()
-
-				// containers cannot return unless thawed, so thaw the
-				// process if necessary
-				freezer := filepath.Join(CGROUP_PATH, fmt.Sprintf("%v", vm.ID), "freezer.state")
-				err = ioutil.WriteFile(freezer, []byte("THAWED"), 0644)
-				if err != nil {
-					log.Error("freezer: %v", err)
-					vm.setState(VM_ERROR)
-					<-waitChan
-				}
-
-				<-waitChan
-				sendKillAck = true // wait to ack until we've cleaned up
-			}
-
-			err = ccNode.CloseUDS(ccPath)
-			if err != nil {
-				log.Errorln(err)
-			}
-
-			vm.listener.Close()
-			vm.unlinkNetns()
-
-			for _, net := range vm.Networks {
-				b, err := getBridge(net.Bridge)
-				if err != nil {
-					log.Error("get bridge: %v", err)
-				} else {
-					b.ContainerTapDestroy(net.VLAN, net.Tap)
-				}
-			}
-
-			// clean up the cgroup directory
-			cgroupPath := filepath.Join(CGROUP_PATH, fmt.Sprintf("%v", vm.ID))
-			err = os.Remove(cgroupPath)
-			if err != nil {
-				log.Errorln(err)
-			}
-
-			if sendKillAck {
-				killAck <- vm.ID
-			}
+			err = cmd.Wait()
+			close(waitChan)
 		}()
-	}
+
+		select {
+		case <-waitChan:
+			log.Info("VM %v exited", vm.ID)
+
+			vm.lock.Lock()
+			defer vm.lock.Unlock()
+
+			// we don't need to check the error for a clean kill,
+			// as there's no way to get here if we killed it.
+			if err != nil {
+				log.Error("kill container: %v", err)
+				vm.setError(err)
+			}
+		case <-vm.kill:
+			log.Info("Killing VM %v", vm.ID)
+
+			vm.lock.Lock()
+			defer vm.lock.Unlock()
+
+			cmd.Process.Kill()
+
+			// containers cannot return unless thawed, so thaw the
+			// process if necessary
+			if err = vm.thaw(); err != nil {
+				log.Errorln(err)
+				vm.setError(err)
+			}
+
+			// wait for the taskset to actually exit (from
+			// uninterruptible sleep state), or timeout.
+			start := time.Now()
+
+			for {
+				if time.Since(start) > CONTAINER_KILL_TIMEOUT {
+					err = fmt.Errorf("container kill timeout")
+					log.Errorln(err)
+					vm.setError(err)
+					break
+				}
+				t, err := ioutil.ReadFile(filepath.Join(cgroupPath, "tasks"))
+				if err != nil {
+					log.Errorln(err)
+					vm.setError(err)
+					break
+				}
+				if len(t) == 0 {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+
+			sendKillAck = true // wait to ack until we've cleaned up
+		}
+
+		err = ccNode.CloseUDS(ccPath)
+		if err != nil {
+			log.Errorln(err)
+		}
+
+		vm.listener.Close()
+		vm.unlinkNetns()
+
+		for _, net := range vm.Networks {
+			b, err := getBridge(net.Bridge)
+			if err != nil {
+				log.Error("get bridge: %v", err)
+			} else {
+				b.iml.DelMac(net.MAC)
+				b.ContainerTapDestroy(net.VLAN, net.Tap)
+			}
+		}
+
+		// clean up the cgroup directory
+		err = os.Remove(cgroupPath)
+		if err != nil {
+			log.Errorln(err)
+		}
+
+		if vm.State != VM_ERROR {
+			// Set to QUIT unless we've already been put into the error state
+			vm.setState(VM_QUIT)
+		}
+
+		if sendKillAck {
+			killAck <- vm.ID
+		}
+	}()
 
 	return nil
 }
@@ -1206,6 +1127,24 @@ func (vm *ContainerVM) console(stdin, stdout, stderr *os.File) {
 		io.Copy(stdin, conn)
 		log.Debug("disconnected!")
 	}
+}
+
+func (vm *ContainerVM) freeze() error {
+	freezer := filepath.Join(CGROUP_PATH, fmt.Sprintf("%v", vm.ID), "freezer.state")
+	if err := ioutil.WriteFile(freezer, []byte("FROZEN"), 0644); err != nil {
+		return fmt.Errorf("freezer: %v", err)
+	}
+
+	return nil
+}
+
+func (vm *ContainerVM) thaw() error {
+	freezer := filepath.Join(CGROUP_PATH, fmt.Sprintf("%v", vm.ID), "freezer.state")
+	if err := ioutil.WriteFile(freezer, []byte("THAWED"), 0644); err != nil {
+		return fmt.Errorf("freezer: %v", err)
+	}
+
+	return nil
 }
 
 func containerSetCapabilities() error {
@@ -1480,67 +1419,119 @@ func containerMountDefaults(fsPath string) error {
 
 // aggressively cleanup container cruff, called by the nuke api
 func containerNuke() {
-	// walk /sys/fs/cgroup/minimega for tasks, killing each one
-	err := filepath.Walk(CGROUP_PATH, func(path string, info os.FileInfo, err error) error {
+	// walk CGROUP_PATH for tasks, killing each one
+	if _, err := os.Stat(CGROUP_PATH); err == nil {
+		err := filepath.Walk(CGROUP_PATH, containerNukeWalker)
 		if err != nil {
+			log.Errorln(err)
+		}
+	}
+
+	// Allow udev to sync
+	time.Sleep(time.Second * 1)
+
+	// umount megamount_*, this include overlayfs mounts
+	d, err := ioutil.ReadFile("/proc/mounts")
+	if err != nil {
+		log.Errorln(err)
+	} else {
+		mounts := strings.Split(string(d), "\n")
+		for _, m := range mounts {
+			if strings.Contains(m, "megamount") {
+				mount := strings.Split(m, " ")[1]
+				if err := syscall.Unmount(mount, 0); err != nil {
+					log.Error("overlay unmount %s: %v", m, err)
+				}
+			}
+		}
+	}
+
+	err = containerCleanCgroupDirs()
+	if err != nil {
+		log.Errorln(err)
+	}
+
+	// umount cgroup_root
+	err = syscall.Unmount(CGROUP_ROOT, 0)
+	if err != nil {
+		log.Error("cgroup_root unmount: %v", err)
+	}
+
+	// remove meganet_* from /var/run/netns
+	if _, err := os.Stat("/var/run/netns"); err == nil {
+		netns, err := ioutil.ReadDir("/var/run/netns")
+		if err != nil {
+			log.Errorln(err)
+		} else {
+			for _, n := range netns {
+				if strings.Contains(n.Name(), "meganet") {
+					err := os.Remove(filepath.Join("/var/run/netns", n.Name()))
+					if err != nil {
+						log.Errorln(err)
+					}
+				}
+			}
+		}
+	}
+}
+
+func containerNukeWalker(path string, info os.FileInfo, err error) error {
+	if err != nil {
+		return nil
+	}
+
+	log.Debug("walking file: %v", path)
+
+	switch info.Name() {
+	case "tasks":
+		d, err := ioutil.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		pids := strings.Fields(string(d))
+		for _, pid := range pids {
+			log.Debug("found pid: %v", pid)
+
+			fmt.Println("killing process:", pid)
+			processWrapper("kill", "-9", pid)
+		}
+	}
+
+	return nil
+}
+
+// remove state across cgroup mounts
+func containerCleanCgroupDirs() error {
+	_, err := os.Stat(CGROUP_PATH)
+	if err != nil {
+		return nil
+	}
+
+	err = filepath.Walk(CGROUP_PATH, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if path == CGROUP_PATH {
 			return nil
 		}
 
 		log.Debug("walking file: %v", path)
 
-		switch info.Name() {
-		case "tasks":
-			d, err := ioutil.ReadFile(path)
-			pids := strings.Fields(string(d))
-			for _, pid := range pids {
-				log.Debug("found pid: %v", pid)
-
-				log.Infoln("killing process:", pid)
-				out, err := processWrapper("kill", "-9", pid)
-				if err != nil {
-					log.Error("%v: %v", err, out)
-				}
-			}
-			// remove the directory for this vm
-			dir := filepath.Dir(path)
-			err = os.Remove(dir)
+		if info.IsDir() {
+			err = os.Remove(path)
 			if err != nil {
 				log.Errorln(err)
+				return err
 			}
 		}
+
 		return nil
 	})
-
-	// remove cgroup structure
-	err = os.Remove(CGROUP_PATH)
 	if err != nil {
-		log.Errorln(err)
+		return err
 	}
 
-	// umount megamount_*
-	d, err := ioutil.ReadFile("/proc/mounts")
-	mounts := strings.Fields(string(d))
-	for _, m := range mounts {
-		if strings.Contains(m, "megamount") {
-			err := syscall.Unmount(m, 0)
-			if err != nil {
-				log.Error("overlay unmount: %v", err)
-			}
-		}
-	}
-
-	// remove meganet_* from /var/run/netns
-	netns, err := ioutil.ReadDir("/var/run/netns")
-	if err != nil {
-		log.Errorln(err)
-	} else {
-		for _, n := range netns {
-			if strings.Contains(n.Name(), "meganet") {
-				err := os.Remove(filepath.Join("/var/run/netns", n.Name()))
-				if err != nil {
-					log.Errorln(err)
-				}
-			}
-		}
-	}
+	return os.Remove(CGROUP_PATH)
 }

@@ -93,7 +93,7 @@ var wifiAPs map[string]accessPoint // Global collection of access points
 // Ensure that vmAndroid implements the VM interface
 var _ VM = (*AndroidVM)(nil)
 
-var telephonyAllocs = map[int]chan int{}
+var telephonyAllocs = map[int]*Counter{}
 
 var androidMasks = []string{
 	"id", "name", "state", "memory", "vcpus", "type", "vlan", "bridge", "tap",
@@ -107,7 +107,7 @@ func init() {
 		fns.Clear(&vmConfig.AndroidConfig)
 	}
 
-	telephonyAllocs[vmConfig.NumberPrefix] = make(chan int)
+	telephonyAllocs[vmConfig.NumberPrefix] = NewCounter()
 
 	wifiAPs = make(map[string]accessPoint)
 
@@ -115,12 +115,12 @@ func init() {
 }
 
 // Copy makes a deep copy and returns reference to the new struct.
-func (old *AndroidConfig) Copy() *AndroidConfig {
-	res := new(AndroidConfig)
-
+func (old AndroidConfig) Copy() AndroidConfig {
 	// Copy all fields
-	*res = *old
+	res := old
 
+	// Make deep copy of slices
+	
 	return res
 }
 
@@ -142,7 +142,7 @@ func NewAndroid(name string) *AndroidVM {
 	vm.KvmVM = *NewKVM(name)
 	vm.Type = Android
 
-	vm.AndroidConfig = *vmConfig.AndroidConfig.Copy() // deep-copy configured fields
+	vm.AndroidConfig = vmConfig.AndroidConfig.Copy() // deep-copy configured fields
 
 	// Clear the CPU
 	if vm.CPU != "" {
@@ -169,88 +169,75 @@ func (vm *AndroidVM) String() string {
 	return fmt.Sprintf("%s:%d:android", hostname, vm.ID)
 }
 
-func (vm *AndroidVM) Launch(ack chan int) error {
-	// Create new ACK channel so that we can initialize sensors after kvm does
-	// it's thing.
-	localAck := make(chan int)
-
-	// Call "super" Launch which is asynchronous for KvmVMs
-	if err := vm.KvmVM.Launch(localAck); err != nil {
+func (vm *AndroidVM) Launch() error {
+	defer vm.lock.Unlock()
+	// Call "super" Launch on the KVM VM
+	if err := vm.KvmVM.launch(); err != nil {
 		return err
 	}
 
-	// Initialize sensors after VM boots
+	var err error
+
+	// Initialize GPS
+	vm.gpsPath = path.Join(vm.instancePath, "serial0")
+	vm.gpsConn, err = net.Dial("unix", vm.gpsPath)
+	if err != nil {
+		log.Error("start gps sensor: %v", err)
+		vm.setError(err)
+		return err
+	}
+	vm.gpsWriter = bufio.NewWriter(vm.gpsConn)
+
+	// Setup the modem
+	prefix := vm.NumberPrefix
+	vm.Number, err = NumberPrefix(prefix).Next(telephonyAllocs[prefix])
+	if err != nil {
+		log.Error("start telephony sensor: %v", err)
+		vm.setError(err)
+		return err
+	}
+
+	outChan := make(chan minimodem.Message)
+
+	vm.Modem, err = minimodem.NewModem(
+		vm.Number,
+		path.Join(vm.instancePath, "serial1"), // hard coded based on Android vm image
+		outChan,
+	)
+	if err != nil {
+		log.Error("start telephony modem: %v", err)
+		vm.setError(err)
+		return err
+	}
+
+	// Run the modem
+	go vm.runModem()
+
+	// Read from the modem's outbox periodically and send out the messages
+	go vm.runPostman(outChan)
+
+	// Setup the wifi
+	vm.wifiModem, err = miniwifi.NewModem(
+		path.Join(vm.instancePath, "virtio-serial0"), // hard coded based on Android vm image
+		path.Join(vm.instancePath, "virtio-serial1"), // hard coded based on Android vm image
+	)
+	if err != nil {
+		log.Error("start wifi modem: %v", err)
+		vm.setError(err)
+		return err
+	}
+
+	go vm.wifiModem.Run()
+
 	go func() {
-		<-localAck
-		defer func() { ack <- vm.ID }()
-
-		if vm.GetState() == VM_ERROR {
-			return
-		}
-
-		var err error
-
-		// Initialize GPS
-		vm.gpsPath = path.Join(vm.instancePath, "serial0")
-		vm.gpsConn, err = net.Dial("unix", vm.gpsPath)
-		if err != nil {
-			log.Error("start gps sensor: %v", err)
-			vm.setState(VM_ERROR)
-			return
-		}
-		vm.gpsWriter = bufio.NewWriter(vm.gpsConn)
-
-		// Setup the modem
-		prefix := vm.NumberPrefix
-		vm.Number, err = NumberPrefix(prefix).Next(telephonyAllocs[prefix])
-		if err != nil {
-			log.Error("start telephony sensor: %v", err)
-			vm.setState(VM_ERROR)
-			return
-		}
-
-		outChan := make(chan minimodem.Message)
-
-		vm.Modem, err = minimodem.NewModem(
-			vm.Number,
-			path.Join(vm.instancePath, "serial1"), // hard coded based on Android vm image
-			outChan,
-		)
-		if err != nil {
-			log.Error("start telephony modem: %v", err)
-			vm.setState(VM_ERROR)
-			return
-		}
-
-		// Run the modem
-		go vm.runModem()
-
-		// Read from the modem's outbox periodically and send out the messages
-		go vm.runPostman(outChan)
-
-		// Setup the wifi
-		vm.wifiModem, err = miniwifi.NewModem(
-			path.Join(vm.instancePath, "virtio-serial0"), // hard coded based on Android vm image
-			path.Join(vm.instancePath, "virtio-serial1"), // hard coded based on Android vm image
-		)
-		if err != nil {
-			log.Error("start wifi modem: %v", err)
-			vm.setState(VM_ERROR)
-			return
-		}
-
-		go vm.wifiModem.Run()
-
-		go func() {
-			for {
-				network := <-vm.wifiModem.NetworkNameChan
-				log.Debug("VM %v changed to wifi network named %v", vm.GetName(), network)
-				if net, ok := vm.accessPoints[network]; ok {
-					log.Debug("VM %v switching to vlan %v on bridge %v", vm.GetName(), net.vlan, net.bridge)
-					vm.NetworkConnect(0, net.bridge, net.vlan)
-				}
+		for {
+			network := <-vm.wifiModem.NetworkNameChan
+			log.Debug("VM %v changed to wifi network named %v", vm.GetName(), network)
+			if net, ok := vm.accessPoints[network]; ok {
+				log.Debug("VM %v switching to vlan %v on bridge %v", vm.GetName(), net.vlan, net.bridge)
+				vm.NetworkConnect(0, net.bridge, net.vlan)
 			}
-		}()
+		}
 	}()
 
 	return nil
@@ -315,8 +302,8 @@ func (n NumberPrefix) String() string {
 }
 
 // Get the next number with assistance of chan
-func (n NumberPrefix) Next(idChan chan int) (int, error) {
-	id := <-idChan
+func (n NumberPrefix) Next(c *Counter) (int, error) {
+	id := c.Next()
 
 	var prefixLen int
 	for i := n; i > 0; i /= 10 {
@@ -500,13 +487,13 @@ func (vm *AndroidVM) SetWifiSSIDs(ssids ...string) {
 }
 
 func updateAccessPointsVisible() {
-	for _, vm := range vms.findVmsByType(Android) {
+	for _, vm := range vms.FindAndroidVMs() {
 		if vm.GetState() != VM_RUNNING {
 			continue
 		}
 		points := []miniwifi.APInfo{}
 		for _, ap := range wifiAPs {
-			signal := ap.signalStrength(vm.(*AndroidVM).currentLocation)
+			signal := ap.signalStrength(vm.currentLocation)
 			if signal > -70 {
 				points = append(points, miniwifi.APInfo{SSID: ap.ssid, Power: ap.power})
 			} else if ap.mW == 0 {
@@ -514,6 +501,6 @@ func updateAccessPointsVisible() {
 				points = append(points, miniwifi.APInfo{SSID: ap.ssid, Power: -44})
 			}
 		}
-		vm.(*AndroidVM).wifiModem.UpdateScanResults(points)
+		vm.wifiModem.UpdateScanResults(points)
 	}
 }
