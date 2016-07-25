@@ -278,6 +278,8 @@ func (vm *KvmVM) Conflicts(vm2 VM) error {
 		return vm.ConflictsKVM(vm2)
 	case *ContainerVM:
 		return vm.BaseVM.conflicts(vm2.BaseVM)
+	case *AndroidVM:
+		return vm.ConflictsKVM(&(vm2.KvmVM))
 	}
 
 	return errors.New("unknown VM type")
