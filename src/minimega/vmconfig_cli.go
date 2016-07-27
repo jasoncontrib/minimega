@@ -583,6 +583,8 @@ func cliVmConfigField(c *minicli.Command, resp *minicli.Response, field string) 
 		config = &vmConfig.KVMConfig
 	} else if fns, ok = containerConfigFns[field]; ok {
 		config = &vmConfig.ContainerConfig
+	} else if fns, ok = androidConfigFns[field]; ok {
+		config = &vmConfig.AndroidConfig
 	} else {
 		return fmt.Errorf("unknown config field: `%s`", field)
 	}
