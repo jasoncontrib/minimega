@@ -177,8 +177,10 @@ func gpsMove() {
 			}
 
 			// Update currentLocation
-			vm.currentLocation.lat += Δlat
-			vm.currentLocation.long += Δlong
+			newlat := vm.currentLocation.lat + Δlat
+			newlong := vm.currentLocation.long + Δlong
+			nmea := toNMEAString(newlat, newlong, 1)
+			vm.PushGPS(nmea)
 			log.Info("VM %v moved to point %v", vm.GetName(), vm.currentLocation)
 		}
 		updateAccessPointsVisible()
