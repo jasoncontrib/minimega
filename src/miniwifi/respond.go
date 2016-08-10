@@ -183,7 +183,7 @@ func (m *Modem) getScanResults() string {
 	} else {
 		s += "####"
 	}
-	fmt.Printf("getScanResults = %v\n", s)
+	log.Debug("getScanResults = %v\n", s)
 	return s
 }
 
@@ -204,7 +204,7 @@ func (m *Modem) getBatchedScanResults() string {
 		s += "====\n"
 	}
 	s += "----"
-	fmt.Printf("getBatchedScanResults = %v\n", s)
+	log.Debug("getBatchedScanResults = %v\n", s)
 	return s
 }
 
@@ -218,7 +218,7 @@ func (m *Modem) addNetwork() int {
 	m.networks[id]["scan_ssid"] = "0"
 	m.networks[id]["group"] = "CCMP TKIP WEP104 WEP40"
 	m.networks[id]["engine"] = "0"
-	fmt.Printf("adding network id %v\n", id)
+	log.Debug("adding network id %v\n", id)
 	return id
 }
 
@@ -233,7 +233,7 @@ func (m *Modem) selectNetwork(cmd string) {
 		return
 	}
 	m.selectedNetwork = id
-	fmt.Printf("selected network %v\n", id)
+	log.Debug("selected network %v\n", id)
 	m.NetworkNameChan <- m.networks[id]["ssid"]
 }
 
@@ -250,7 +250,7 @@ func (m *Modem) removeNetwork(cmd string) {
 	if id == m.selectedNetwork {
 		m.selectedNetwork = -1
 	}
-	fmt.Printf("removeNetwork %v\n", id)
+	log.Debug("removeNetwork %v\n", id)
 	delete(m.networks, id)
 }
 

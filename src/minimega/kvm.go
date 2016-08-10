@@ -675,20 +675,7 @@ func (vm VMConfig) qemuArgs(id int, vmPath string) []string {
 		}
 	}
 
-	// virtio-serial
-	// we always get a cc virtio port
-	args = append(args, "-device")
-	args = append(args, fmt.Sprintf("virtio-serial-pci,id=virtio-serial0,bus=pci.%v,addr=0x%x", bus, addr))
-	args = append(args, "-chardev")
-	args = append(args, fmt.Sprintf("socket,id=charvserialCC,path=%v,server,nowait", filepath.Join(vmPath, "cc")))
-	args = append(args, "-device")
-	args = append(args, fmt.Sprintf("virtserialport,nr=1,bus=virtio-serial0.0,chardev=charvserialCC,id=charvserialCC,name=cc"))
-	addr++
-	if addr == DEV_PER_BUS { // check to see if we've run out of addr slots on this bus
-		addBus()
-	}
-
-	virtio_slot := 0 // start at 0 since we immediately increment and we already have a cc port
+	virtio_slot := -1 // start at -1 since we immediately increment
 	for i := 0; i < vm.VirtioPorts; i++ {
 		// qemu port number
 		nr := i%DEV_PER_VIRTIO + 1
@@ -705,12 +692,25 @@ func (vm VMConfig) qemuArgs(id int, vmPath string) []string {
 				addBus()
 			}
 		}
-
 		args = append(args, "-chardev")
 		args = append(args, fmt.Sprintf("socket,id=charvserial%v,path=%v%v,server,nowait", i, filepath.Join(vmPath, "virtio-serial"), i))
 
 		args = append(args, "-device")
 		args = append(args, fmt.Sprintf("virtserialport,nr=%v,bus=virtio-serial%v.0,chardev=charvserial%v,id=charvserial%v,name=virtio-serial%v", nr, virtio_slot, i, i, i))
+	}
+
+	// virtio-serial
+	// we always get a cc virtio port
+	virtio_slot++
+	args = append(args, "-device")
+	args = append(args, fmt.Sprintf("virtio-serial-pci,id=virtio-serial%v,bus=pci.%v,addr=0x%x", virtio_slot, bus, addr))
+	args = append(args, "-chardev")
+	args = append(args, fmt.Sprintf("socket,id=charvserialCC,path=%v,server,nowait", filepath.Join(vmPath, "cc")))
+	args = append(args, "-device")
+	args = append(args, fmt.Sprintf("virtserialport,nr=1,bus=virtio-serial%v.0,chardev=charvserialCC,id=charvserialCC,name=cc", virtio_slot))
+	addr++
+	if addr == DEV_PER_BUS { // check to see if we've run out of addr slots on this bus
+		addBus()
 	}
 
 	// hook for hugepage support
