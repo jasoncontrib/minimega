@@ -47,9 +47,15 @@ func init() {
 }
 
 func cliSMS(c *minicli.Command, resp *minicli.Response) error {
-	vm, err := vms.FindAndroidVM(c.StringArgs["vm"])
-	if err != nil && c.StringArgs["vm"] != "" {
-		return err
+	var androidVms []*AndroidVM
+	if c.StringArgs["vm"] == Wildcard {
+		androidVms = vms.FindAndroidVMs()
+	} else {
+		vm, err := vms.FindAndroidVM(c.StringArgs["vm"])
+		if err != nil && c.StringArgs["vm"] != "" {
+			return err
+		}
+		androidVms = append(androidVms, vm)
 	}
 
 	// TODO: Check errors?
@@ -60,10 +66,12 @@ func cliSMS(c *minicli.Command, resp *minicli.Response) error {
 	message := strings.Join(c.ListArgs["msg"], " ")
 
 	if c.BoolArgs["push"] {
-		msgs := minimodem.NewMessage(from, vm.Modem.Number, message)
-		for _, msg := range msgs {
-			if err := vm.Modem.PushSMS(msg); err != nil {
-				return fmt.Errorf("error pushing message: %v", err)
+		for _, vm := range androidVms {
+			msgs := minimodem.NewMessage(from, vm.Modem.Number, message)
+			for _, msg := range msgs {
+				if err := vm.Modem.PushSMS(msg); err != nil {
+					return fmt.Errorf("error pushing message: %v", err)
+				}
 			}
 		}
 		return nil
@@ -82,23 +90,13 @@ func cliSMS(c *minicli.Command, resp *minicli.Response) error {
 			}
 		}
 
-		if vm != nil {
+		for _, vm := range androidVms {
 			for _, m := range vm.Modem.Inbox {
 				resp.Tabular = append(resp.Tabular, getRow(vm, m))
 			}
 
 			for _, m := range vm.Modem.Outbox {
 				resp.Tabular = append(resp.Tabular, getRow(vm, m))
-			}
-		} else {
-			for _, vm := range vms.FindAndroidVMs() {
-				for _, m := range vm.Modem.Inbox {
-					resp.Tabular = append(resp.Tabular, getRow(vm, m))
-				}
-
-				for _, m := range vm.Modem.Outbox {
-					resp.Tabular = append(resp.Tabular, getRow(vm, m))
-				}
 			}
 		}
 		return nil
