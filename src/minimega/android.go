@@ -120,7 +120,7 @@ func (old AndroidConfig) Copy() AndroidConfig {
 	res := old
 
 	// Make deep copy of slices
-	
+
 	return res
 }
 
@@ -170,21 +170,21 @@ func NewAndroid(name string) (*AndroidVM, error) {
 }
 
 func (vm *AndroidVM) Copy() VM {
-        vm.lock.Lock()
-        defer vm.lock.Unlock()
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
 
-        vm2 := new(AndroidVM)
+	vm2 := new(AndroidVM)
 
-        // Make shallow copies of all fields
-        *vm2 = *vm
+	// Make shallow copies of all fields
+	*vm2 = *vm
 
 	// We copied a locked VM so we have to unlock it too...
 	defer vm2.lock.Unlock()
 
-        // Make deep copies
-        vm2.AndroidConfig = vm.AndroidConfig.Copy()
+	// Make deep copies
+	vm2.AndroidConfig = vm.AndroidConfig.Copy()
 
-        return vm2
+	return vm2
 }
 
 func (vm *AndroidVM) String() string {

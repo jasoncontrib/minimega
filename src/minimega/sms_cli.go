@@ -6,10 +6,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"minicli"
 	log "minilog"
-	"errors"
 	"minimodem"
 	"os"
 	"strconv"
