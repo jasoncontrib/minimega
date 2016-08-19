@@ -557,6 +557,7 @@ func cliVmConfig(c *minicli.Command, resp *minicli.Response) error {
 			vmConfig.BaseConfig = vm.BaseConfig.Copy()
 			vmConfig.ContainerConfig = vm.ContainerConfig.Copy()
 		case *AndroidVM:
+			vmConfig.BaseConfig = vm.BaseConfig.Copy()
 			vmConfig.AndroidConfig = vm.AndroidConfig.Copy()
 		}
 
