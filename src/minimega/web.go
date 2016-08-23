@@ -165,6 +165,8 @@ func webScreenshot(w http.ResponseWriter, r *http.Request) {
 					continue
 				} else if strings.HasPrefix(resp.Error, "vm not KVM:") {
 					continue
+				} else if strings.HasPrefix(resp.Error, "cannot take screenshot") {
+					continue
 				}
 
 				// Unknown error
@@ -272,8 +274,10 @@ func webVMs(w http.ResponseWriter, r *http.Request) {
 			"memory": config.Memory,
 		}
 
-		if vm, ok := vm.(*KvmVM); ok {
-			vmMap["vnc_port"] = vm.VNCPort
+		if kvm, ok := vm.(*KvmVM); ok {
+			vmMap["vnc_port"] = kvm.VNCPort
+		} else if avm, ok := vm.(*AndroidVM); ok {
+			vmMap["vnc_port"] = avm.VNCPort
 		}
 
 		if config.Networks == nil {
