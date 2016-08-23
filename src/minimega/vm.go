@@ -835,6 +835,8 @@ func getConfig(vm VM) BaseConfig {
 		return vm.BaseConfig
 	case *ContainerVM:
 		return vm.BaseConfig
+	case *AndroidVM:
+		return vm.BaseConfig	
 	}
 
 	return BaseConfig{}
