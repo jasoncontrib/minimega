@@ -239,6 +239,9 @@ func (n *Namespace) hostLaunch(host string, queued queuedVM, respChan chan<- min
 		cmds = append(cmds, saveConfig(kvmConfigFns, &queued.KVMConfig)...)
 	case CONTAINER:
 		cmds = append(cmds, saveConfig(containerConfigFns, &queued.ContainerConfig)...)
+	case Android:
+		cmds = append(cmds, saveConfig(kvmConfigFns, &queued.KVMConfig)...)
+		cmds = append(cmds, saveConfig(androidConfigFns, &queued.AndroidConfig)...)
 	default:
 	}
 

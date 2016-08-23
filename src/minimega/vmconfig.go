@@ -254,6 +254,11 @@ var androidConfigFns = map[string]VMConfigFns{
 				p0 := strconv.Itoa(num)
 				p1 := strconv.Itoa(k)
 
+				if p0 == p1 {
+					// don't complain if they're identical, just return
+					return nil
+				}
+
 				// Check if the new prefix may have already been allocated
 				if strings.HasPrefix(p0, p1) || strings.HasPrefix(p1, p0) {
 					return fmt.Errorf("number prefix overlap --  new: %v, old: %v",
