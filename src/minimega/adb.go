@@ -14,14 +14,34 @@ import (
 var adbCLIHandlers = []minicli.Handler{
 	{ // adb
 		HelpShort: "Perform file/shell operations on Android devices",
-		HelpLong: `Perform file/shell operations on Android devices.
+		HelpLong: `
+Perform file/shell/APK operations on Android devices.
 
-NOTE: Although 'adb pull all <remote> <local>' is valid, it will result in minimega pulling a file from all VMs and attempting to write all versions to the same place. You almost certainly do not want this.
+To transfer a file to all Android VMs (non-Android VMs are ignored):
+
+	adb push all /path/to/local/file /data/somefile
+
+To transfer a file from one VM to the local machine:
+
+	adb pull android-vm /data/somefile /path/to/local/destination
+
+To run a shell command on all devices (results are logged at the 'info' level):
+
+	adb shell all pwd
+
+To install an APK on all devices:
+
+	adb install all /path/to/my_app.apk
+
+NOTE: Although 'adb pull all <remote> <local>' is valid, it will result in
+minimega pulling a file from all VMs and attempting to write all versions to
+the same place. You almost certainly do not want this.
 `,
 		Patterns: []string{
 			"adb <push,> <vm id or name> <local file> <remote destination>",
 			"adb <pull,> <vm id or name> <remote file> [local destination]",
 			"adb <shell,> <vm id or name> <command>...",
+			"adb <install,> <vm id or name> <filename>",
 		},
 		Call: wrapBroadcastCLI(cliAdb),
 	},
@@ -108,6 +128,31 @@ func adbPull(vm, remote, local string) []error {
 	return vms.apply(vm, true, applyFunc)
 }
 
+func adbInstall(vm, filename string) []error {
+	// adb disconnect, this disconnects from everything!
+	out, err := processWrapper("adb", "disconnect")
+	if err != nil {
+		return []error{ fmt.Errorf("%v: %v", err, out) }
+	}
+
+	applyFunc := func(vm VM, _ bool) (bool, error) {
+		// Only operate on Android VMs, otherwise silently return
+		if vt := vm.GetType(); vt != Android {
+			return false, nil
+		}
+
+		args := []string{"install", filename}
+		out, err = runAdbCommand(vm, args)
+		if err != nil {
+			return true, fmt.Errorf("%v: %v", err, out)
+		}
+
+		return true, nil
+	}
+
+	return vms.apply(vm, true, applyFunc)
+}
+
 func adbShell(vm string, command []string) []error {
 	// adb disconnect, this disconnects from everything!
 	out, err := processWrapper("adb", "disconnect")
@@ -151,6 +196,10 @@ func cliAdb(c *minicli.Command, resp *minicli.Response) error {
 		command := c.ListArgs["command"]
 
 		return makeErrSlice(adbShell(vm, command))
+	} else if c.BoolArgs["install"] {
+		filename := c.StringArgs["filename"]
+
+		return makeErrSlice(adbInstall(vm, filename))
 	}
 	return nil
 }
