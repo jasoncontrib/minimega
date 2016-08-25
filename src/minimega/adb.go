@@ -31,6 +31,33 @@ func init() {
 	registerHandlers("adb", adbCLIHandlers)
 }
 
+func runAdbCommand(vm VM, args []string) (string, error) {
+	// Get the first IP4 address
+	nets := vm.GetNetworks()
+	if len(nets) == 0 {
+		return "", errors.New("vm does not have an ip address")
+	}
+	ip4 := nets[0].IP4
+
+	// adb connect IP4:5555
+	address := fmt.Sprintf("%v:5555", ip4)
+	out, err := processWrapper("adb", "connect", address)
+	if err != nil {
+		return out, err
+	}
+
+	// run the command
+	args = append([]string{"adb", "-s", address}, args...)
+	out, err = processWrapper(args...)
+	if err != nil {
+		return out, err
+	}
+	log.Info("%v: %v", address, out)
+
+	return out, nil
+}
+	
+
 func adbPush(vm, local, remote string) []error {
 	// adb disconnect, this disconnects from everything!
 	out, err := processWrapper("adb", "disconnect")
@@ -43,22 +70,9 @@ func adbPush(vm, local, remote string) []error {
 		if vt := vm.GetType(); vt != Android {
 			return false, nil
 		}
-		// Get the first IP4 address
-		nets := vm.GetNetworks()
-		if len(nets) == 0 {
-			return true, errors.New("vm does not have an ip address")
-		}
-		ip4 := nets[0].IP4
 
-		// adb connect IP4:5555
-		address := fmt.Sprintf("%v:5555", ip4)
-		out, err := processWrapper("adb", "connect", address)
-		if err != nil {
-			return true, fmt.Errorf("%v: %v", err, out)
-		}
-
-		// adb push
-		out, err = processWrapper("adb", "-s", address, "push", local, remote)
+		args := []string{"push", local, remote}
+		out, err = runAdbCommand(vm, args)
 		if err != nil {
 			return true, fmt.Errorf("%v: %v", err, out)
 		}
@@ -81,22 +95,9 @@ func adbPull(vm, remote, local string) []error {
 		if vt := vm.GetType(); vt != Android {
 			return false, nil
 		}
-		// Get the first IP4 address
-		nets := vm.GetNetworks()
-		if len(nets) == 0 {
-			return true, errors.New("vm does not have an ip address")
-		}
-		ip4 := nets[0].IP4
 
-		// adb connect IP4:5555
-		address := fmt.Sprintf("%v:5555", ip4)
-		out, err := processWrapper("adb", "connect", address)
-		if err != nil {
-			return true, fmt.Errorf("%v: %v", err, out)
-		}
-
-		// adb push
-		out, err = processWrapper("adb", "-s", address, "pull", remote, local)
+		args := []string{"pull", remote, local}
+		out, err = runAdbCommand(vm, args)
 		if err != nil {
 			return true, fmt.Errorf("%v: %v", err, out)
 		}
@@ -119,27 +120,13 @@ func adbShell(vm string, command []string) []error {
 		if vt := vm.GetType(); vt != Android {
 			return false, nil
 		}
-		// Get the first IP4 address
-		nets := vm.GetNetworks()
-		if len(nets) == 0 {
-			return true, errors.New("vm does not have an ip address")
-		}
-		ip4 := nets[0].IP4
-
-		// adb connect IP4:5555
-		address := fmt.Sprintf("%v:5555", ip4)
-		out, err := processWrapper("adb", "connect", address)
-		if err != nil {
-			return true, fmt.Errorf("%v: %v", err, out)
-		}
 
 		// adb push
-		args := append([]string{"adb", "-s", address, "shell"}, command...)
-		out, err = processWrapper(args...)
+		args := append([]string{"shell"}, command...)
+		out, err = runAdbCommand(vm, args)
 		if err != nil {
 			return true, fmt.Errorf("%v: %v", err, out)
 		}
-		log.Info("%v: %v", address, out)
 
 		return true, nil
 	}
