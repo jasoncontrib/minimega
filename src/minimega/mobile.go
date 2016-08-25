@@ -33,7 +33,7 @@ To create a wifi access point, specify the "create" command. If only an SSID and
 			"mobile ap <create,> <ssid> <vlan> <bridge> <lat> <long> <milliwatts>",
 			"mobile ap <delete,> <ssid>",
 		},
-		Call: wrapSimpleCLI(cliMobileAP),
+		Call: wrapBroadcastCLI(cliMobileAP),
 	},
 }
 
