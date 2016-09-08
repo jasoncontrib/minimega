@@ -182,6 +182,8 @@ func (vm *AndroidVM) Copy() VM {
 	defer vm2.lock.Unlock()
 
 	// Make deep copies
+	vm2.BaseConfig = vm.BaseConfig.Copy()
+	vm2.KVMConfig = vm.KVMConfig.Copy()
 	vm2.AndroidConfig = vm.AndroidConfig.Copy()
 
 	return vm2
