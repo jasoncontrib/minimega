@@ -12,6 +12,7 @@ const (
 	KERNEL_TIMER_FREQ uint64 = 250
 	MIN_BURST_SIZE    uint64 = 2048
 	DEFAULT_LATENCY   string = "100ms"
+	DEFAULT_LIMIT     string = "10000b"
 )
 
 // Traffic control actions
@@ -66,7 +67,7 @@ func (t *Tap) initializeQos() error {
 	cmd = []string{"tc", "qdisc", tcAdd, "dev", t.Name}
 	rate := "1000gbit"
 	burst := getQosBurst(rate)
-	ns = []string{"root", "handle", "1:", "tbf", "rate", rate, "latency", DEFAULT_LATENCY, "burst", burst}
+	ns = []string{"root", "handle", "1:", "tbf", "rate", rate, "limit", DEFAULT_LIMIT, "burst", burst}
 	err = t.qosCmd(append(cmd, ns...))
 	if err != nil {
 		return err
@@ -112,7 +113,7 @@ func (t *Tap) setQos(op QosOption) error {
 		action = tcUpdate
 		burst := getQosBurst(op.Value)
 		ns = []string{"root", "handle", "1:", "tbf", "rate", op.Value,
-			"latency", DEFAULT_LATENCY, "burst", burst}
+			"limit", DEFAULT_LIMIT, "burst", burst}
 		t.Qos.tbfParams.rate = op.Value
 		t.Qos.tbfParams.burst = burst
 	}
