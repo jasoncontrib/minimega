@@ -4,14 +4,6 @@ import (
 	"errors"
 	"fmt"
 	log "minilog"
-	"strconv"
-)
-
-// Used to calulate burst rate for the token bucket filter qdisc
-const (
-	KERNEL_TIMER_FREQ uint64 = 250
-	MIN_BURST_SIZE    uint64 = 2048
-	DEFAULT_LATENCY   string = "100ms"
 )
 
 // Traffic control actions
@@ -35,9 +27,8 @@ type QosOption struct {
 	Value string
 }
 
-type tbfParams struct {
-	rate  string
-	burst string
+type htbParams struct {
+	rate string
 }
 
 type netemParams struct {
@@ -47,21 +38,40 @@ type netemParams struct {
 
 // Tap field enumerating qos parameters
 type qos struct {
-	*tbfParams   // embed
+	*htbParams   // embed
 	*netemParams // embed
 }
 
 func newQos() *qos {
 	return &qos{netemParams: &netemParams{},
-		tbfParams: &tbfParams{}}
+		htbParams: &htbParams{}}
 }
 
 // Set the initial qdisc namespace
 func (t *Tap) initializeQos() error {
+	var cmd []string
+	var ns []string
+	var err error
 	t.Qos = newQos()
-	cmd := []string{"tc", "qdisc", tcAdd, "dev", t.Name}
-	ns := []string{"root", "handle", "1:", "netem", "loss", "0"}
-	return t.qosCmd(append(cmd, ns...))
+
+	cmd = []string{"tc", "qdisc", tcAdd, "dev", t.Name}
+	ns = []string{"root", "handle", "1:", "htb", "default", "12"}
+	err = t.qosCmd(append(cmd, ns...))
+	if err != nil {
+		return err
+	}
+
+	cmd = []string{"tc", "class", tcAdd, "dev", t.Name}
+	ns = []string{"parent", "1:", "classid", "1:12", "htb", "rate", "1000gbit", "ceil", "1000gbit"}
+	err = t.qosCmd(append(cmd, ns...))
+	if err != nil {
+		return err
+	}
+
+	cmd = []string{"tc", "qdisc", tcAdd, "dev", t.Name}
+	ns = []string{"parent", "1:12", "handle", "2:", "netem", "loss", "0"}
+	err = t.qosCmd(append(cmd, ns...))
+	return err
 }
 
 func (t *Tap) destroyQos() error {
@@ -75,6 +85,7 @@ func (t *Tap) destroyQos() error {
 
 func (t *Tap) setQos(op QosOption) error {
 	var action string
+	var cmd []string
 	var ns []string
 
 	if t.Qos == nil {
@@ -87,32 +98,28 @@ func (t *Tap) setQos(op QosOption) error {
 	switch op.Type {
 	case Loss:
 		action = tcUpdate
-		ns = []string{"root", "handle", "1:", "netem", "loss", op.Value}
+		cmd = []string{"tc", "qdisc", action, "dev", t.Name}
+		ns = []string{"parent", "1:12", "handle", "2:", "netem", "loss", op.Value}
 		t.Qos.netemParams.loss = op.Value
 	case Delay:
 		action = tcUpdate
-		ns = []string{"root", "handle", "1:", "netem", "delay", op.Value}
+		cmd = []string{"tc", "qdisc", action, "dev", t.Name}
+		ns = []string{"parent", "1:12", "handle", "2:", "netem", "delay", op.Value}
 		t.Qos.netemParams.delay = op.Value
 	case Rate:
-		if t.Qos.tbfParams.rate == "" {
-			action = tcAdd
-		} else {
-			action = tcUpdate
-		}
-		burst := getQosBurst(op.Value)
-		ns = []string{"parent", "1:", "handle", "2:", "tbf", "rate", op.Value,
-			"latency", DEFAULT_LATENCY, "burst", burst}
-		t.Qos.tbfParams.rate = op.Value
-		t.Qos.tbfParams.burst = burst
+		action = tcUpdate
+		cmd = []string{"tc", "class", action, "dev", t.Name}
+		ns = []string{"parent", "1:", "classid", "1:12", "htb", "rate", op.Value,
+			"ceil", op.Value}
+		t.Qos.htbParams.rate = op.Value
 	}
 
-	cmd := []string{"tc", "qdisc", action, "dev", t.Name}
 	return t.qosCmd(append(cmd, ns...))
 }
 
 // Execute a qos command string
 func (t *Tap) qosCmd(cmd []string) error {
-	log.Debug("recieved qos command %v", cmd)
+	log.Debug("received qos command %v", cmd)
 	out, err := processWrapper(cmd...)
 	if err != nil {
 		// Clean up
@@ -166,8 +173,8 @@ func (b *Bridge) GetQos(tap string) []QosOption {
 func (b *Bridge) getQos(t *Tap) []QosOption {
 	var ops []QosOption
 
-	if t.Qos.tbfParams.rate != "" {
-		ops = append(ops, QosOption{Rate, t.Qos.tbfParams.rate})
+	if t.Qos.htbParams.rate != "" {
+		ops = append(ops, QosOption{Rate, t.Qos.htbParams.rate})
 	}
 	if t.Qos.netemParams.loss != "" {
 		ops = append(ops, QosOption{Loss, t.Qos.netemParams.loss})
@@ -176,27 +183,4 @@ func (b *Bridge) getQos(t *Tap) []QosOption {
 		ops = append(ops, QosOption{Delay, t.Qos.netemParams.delay})
 	}
 	return ops
-}
-
-func getQosBurst(rate string) string {
-	r := rate[:len(rate)-4]
-	unit := rate[len(rate)-4:]
-	var bps uint64
-
-	switch unit {
-	case "kbit":
-		bps = 1 << 10
-	case "mbit":
-		bps = 1 << 20
-	case "gbit":
-		bps = 1 << 30
-	}
-	burst, _ := strconv.ParseUint(r, 10, 64)
-
-	// Burst size is in bytes
-	burst = ((burst * bps) / KERNEL_TIMER_FREQ) / 8
-	if burst < MIN_BURST_SIZE {
-		burst = MIN_BURST_SIZE
-	}
-	return fmt.Sprintf("%db", burst)
 }
