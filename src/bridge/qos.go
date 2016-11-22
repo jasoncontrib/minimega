@@ -58,10 +58,24 @@ func newQos() *qos {
 
 // Set the initial qdisc namespace
 func (t *Tap) initializeQos() error {
+	var cmd []string
+	var ns []string
+	var err error
 	t.Qos = newQos()
-	cmd := []string{"tc", "qdisc", tcAdd, "dev", t.Name}
-	ns := []string{"root", "handle", "1:", "netem", "loss", "0"}
-	return t.qosCmd(append(cmd, ns...))
+
+	cmd = []string{"tc", "qdisc", tcAdd, "dev", t.Name}
+	rate := "1000gbit"
+	burst := getQosBurst(rate)
+	ns = []string{"root", "handle", "1:", "tbf", "rate", rate, "latency", DEFAULT_LATENCY, "burst", burst}
+	err = t.qosCmd(append(cmd, ns...))
+	if err != nil {
+		return err
+	}
+
+	cmd = []string{"tc", "qdisc", tcAdd, "dev", t.Name}
+	ns = []string{"parent", "1:", "handle", "2:", "netem", "loss", "0"}
+	err = t.qosCmd(append(cmd, ns...))
+	return err
 }
 
 func (t *Tap) destroyQos() error {
@@ -82,25 +96,22 @@ func (t *Tap) setQos(op QosOption) error {
 		if err != nil {
 			return err
 		}
+		log.Debug("initialized qos")
 	}
 
 	switch op.Type {
 	case Loss:
 		action = tcUpdate
-		ns = []string{"root", "handle", "1:", "netem", "loss", op.Value}
+		ns = []string{"parent", "1:12", "handle", "2:", "netem", "loss", op.Value}
 		t.Qos.netemParams.loss = op.Value
 	case Delay:
 		action = tcUpdate
-		ns = []string{"root", "handle", "1:", "netem", "delay", op.Value}
+		ns = []string{"parent", "1:", "handle", "2:", "netem", "delay", op.Value}
 		t.Qos.netemParams.delay = op.Value
 	case Rate:
-		if t.Qos.tbfParams.rate == "" {
-			action = tcAdd
-		} else {
-			action = tcUpdate
-		}
+		action = tcUpdate
 		burst := getQosBurst(op.Value)
-		ns = []string{"parent", "1:", "handle", "2:", "tbf", "rate", op.Value,
+		ns = []string{"root", "handle", "1:", "tbf", "rate", op.Value,
 			"latency", DEFAULT_LATENCY, "burst", burst}
 		t.Qos.tbfParams.rate = op.Value
 		t.Qos.tbfParams.burst = burst
@@ -112,7 +123,7 @@ func (t *Tap) setQos(op QosOption) error {
 
 // Execute a qos command string
 func (t *Tap) qosCmd(cmd []string) error {
-	log.Debug("recieved qos command %v", cmd)
+	log.Debug("received qos command %v", cmd)
 	out, err := processWrapper(cmd...)
 	if err != nil {
 		// Clean up
