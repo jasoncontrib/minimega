@@ -293,9 +293,11 @@ and a JSON string, and returns the JSON encoded response. For example:
 	{ // vm screenshot
 		HelpShort: "take a screenshot of a running vm",
 		HelpLong: `
-Take a screenshot of the framebuffer of a running VM. The screenshot is saved
-in PNG format as "screenshot.png" in the VM's runtime directory (by default
-/tmp/minimega/<vm id>/screenshot.png).
+Take a screenshot of the framebuffer of a running VM. By default, the screenshot
+is saved in PNG format to
+/tmp/minimega/screenshots_<namespace>/<vm name>.png,
+or if the VM does not belong to a namespace,
+/tmp/minimega/screenshots/<vm name>.png.
 
 An optional argument sets the maximum dimensions in pixels, while keeping the
 aspect ratio. For example, to set either maximum dimension of the output image
@@ -708,9 +710,21 @@ func cliVmScreenshot(c *minicli.Command, resp *minicli.Response) error {
 		return err
 	}
 
-	path := filepath.Join(*f_base, strconv.Itoa(vm.GetID()), "screenshot.png")
-	if file != "" {
-		path = file
+	path := file
+
+	if path == "" {
+		ssDirName := "screenshots"
+		nsName := GetNamespaceName()
+
+		if nsName != "" {
+			ssDirName += "_" + nsName
+		}
+
+		path = filepath.Join(*f_base, ssDirName, vm.GetName()+".png")
+
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return err
+		}
 	}
 
 	// add user data in case this is going across meshage
