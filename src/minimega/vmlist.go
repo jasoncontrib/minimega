@@ -8,12 +8,14 @@ import (
 	"bridge"
 	"errors"
 	"fmt"
+	"meshage"
 	"minicli"
 	log "minilog"
 	"os"
 	"ranges"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,7 +31,38 @@ type Tag struct {
 	Key, Value string
 }
 
+// QueuedVMs stores all the info needed to launch a batch of VMs
+type QueuedVMs struct {
+	Names    []string
+	VMType   // embed
+	VMConfig // embed
+}
+
 var vmLock sync.Mutex // lock for synchronizing access to vms
+
+// GetFiles looks through the VMConfig for files in the IOMESHAGE directory and
+// fetches them if they do not already exist. Currently, we enumerate all the
+// fields that take a file.
+func (q QueuedVMs) GetFiles() error {
+	files := []string{
+		q.ContainerConfig.Preinit,
+		q.KVMConfig.CdromPath,
+		q.KVMConfig.InitrdPath,
+		q.KVMConfig.KernelPath,
+		q.KVMConfig.MigratePath,
+	}
+	files = append(files, q.KVMConfig.DiskPaths...)
+
+	for _, f := range files {
+		if strings.HasPrefix(f, *f_iomBase) {
+			if _, err := iomHelper(f); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
 
 // Count of VMs in current namespace.
 func (vms VMs) Count() int {
@@ -69,7 +102,7 @@ func (vms VMs) Info(masks []string, resp *minicli.Response) {
 		}
 
 		// Update dynamic fields before querying info
-		vm.UpdateBW()
+		vm.UpdateNetworks()
 
 		// Copy the VM and use the copy from here on. This ensures that the
 		// Tabular info matches the Data field.
@@ -201,6 +234,28 @@ func (vms VMs) findVM(s string, checkNamespace bool) VM {
 	return nil
 }
 
+// FindContainerVM finds a VM in the active namespace based on its ID, name, or UUID.
+func (vms VMs) FindContainerVM(s string) (*ContainerVM, error) {
+	vmLock.Lock()
+	defer vmLock.Unlock()
+
+	return vms.findContainerVM(s)
+}
+
+// findContainerVM is FindContainerVM without locking vmLock.
+func (vms VMs) findContainerVM(s string) (*ContainerVM, error) {
+	vm := vms.findVM(s, true)
+	if vm == nil {
+		return nil, vmNotFound(s)
+	}
+
+	if vm, ok := vm.(*ContainerVM); ok {
+		return vm, nil
+	}
+
+	return nil, vmNotContainer(s)
+}
+
 // FindKvmVM finds a VM in the active namespace based on its ID, name, or UUID.
 func (vms VMs) FindKvmVM(s string) (*KvmVM, error) {
 	vmLock.Lock()
@@ -285,21 +340,31 @@ func (vms VMs) FindAndroidVMs() []*AndroidVM {
 	return res
 }
 
-func (vms VMs) Launch(names []string, vmType VMType) <-chan error {
-	vmLock.Lock()
-
+func (vms VMs) Launch(namespace string, q QueuedVMs) <-chan error {
 	out := make(chan error)
 
-	log.Info("launching %v %v vms", len(names), vmType)
+	if err := q.GetFiles(); err != nil {
+		// send from separate goroutine to avoid deadlock
+		go func() {
+			defer close(out)
+			out <- err
+		}()
+
+		return out
+	}
+
+	vmLock.Lock()
+
+	log.Info("launching %v %v vms", len(q.Names), q.VMType)
 	start := time.Now()
 
 	var wg sync.WaitGroup
 
-	for _, name := range names {
+	for _, name := range q.Names {
 		// This uses the global vmConfigs so we have to create the VMs in the
 		// CLI thread (before the next command gets processed which could
 		// change the vmConfigs).
-		vm, err := NewVM(name, vmType)
+		vm, err := NewVM(name, namespace, q.VMType, q.VMConfig)
 		if err == nil {
 			for _, vm2 := range vms {
 				if err = vm2.Conflicts(vm); err != nil {
@@ -347,7 +412,7 @@ func (vms VMs) Launch(names []string, vmType VMType) <-chan error {
 		wg.Wait()
 
 		stop := time.Now()
-		log.Info("launched %v %v vms in %v", len(names), vmType, stop.Sub(start))
+		log.Info("launched %v %v vms in %v", len(q.Names), q.VMType, stop.Sub(start))
 	}()
 
 	return out
@@ -446,6 +511,8 @@ func (vms VMs) Flush() {
 			if err := vm.Flush(); err != nil {
 				log.Error("clogged VM: %v", err)
 			}
+
+			ccNode.UnregisterVM(vm.GetUUID())
 
 			delete(vms, i)
 		}
@@ -624,46 +691,30 @@ func (vms VMs) apply(target string, concurrent bool, fn vmApplyFunc) []error {
 	return errs
 }
 
-// HostVMs gets all the VMs running on the specified remote host, filtered to
-// the current namespace, if applicable.
-func HostVMs(host string) VMs {
-	cmdLock.Lock()
-	defer cmdLock.Unlock()
+// meshageVMLauncher handles VM launches sent by the scheduler
+func meshageVMLauncher() {
+	for m := range meshageVMLaunchChan {
+		go func(m *meshage.Message) {
+			cmd := m.Body.(meshageVMLaunch)
 
-	return hostVMs(host)
-}
+			errs := []string{}
 
-// hostVMs is HostVMs without locking cmdLock.
-func hostVMs(host string) VMs {
-	// Compile info command and set it not to record
-	cmd := minicli.MustCompile("vm info")
-	cmd.SetRecord(false)
-	cmd.SetSource(GetNamespaceName())
-
-	cmds := makeCommandHosts([]string{host}, cmd)
-
-	var vms VMs
-
-	// LOCK: see func description.
-	for resps := range runCommands(cmds...) {
-		for _, resp := range resps {
-			if resp.Error != "" {
-				log.Errorln(resp.Error)
-				continue
-			}
-
-			if vms2, ok := resp.Data.(VMs); ok {
-				if vms != nil {
-					// odd... should only be one vms per host and we're
-					// querying a single host
-					log.Warn("so many vms")
+			if len(errs) == 0 {
+				for err := range vms.Launch(cmd.Namespace, cmd.QueuedVMs) {
+					if err != nil {
+						errs = append(errs, err.Error())
+					}
 				}
-				vms = vms2
 			}
-		}
-	}
 
-	return vms
+			to := []string{m.Source}
+			msg := meshageVMResponse{Errors: errs, TID: cmd.TID}
+
+			if _, err := meshageNode.Set(to, msg); err != nil {
+				log.Errorln(err)
+			}
+		}(m)
+	}
 }
 
 // GlobalVMs gets the VMs from all hosts in the mesh, filtered to the current

@@ -23,12 +23,13 @@ var (
 )
 
 type Router struct {
-	vmID         int        // local (and effectively unique regardless of namespace) vm id
+	vm           VM
 	IPs          [][]string // positional ip address (index 0 is the first listed network in vm config net)
 	logLevel     string
 	updateIPs    bool // only update IPs if we've made changes
 	dhcp         map[string]*dhcp
-	dns          map[string]string
+	dns          map[string][]string
+	upstream     string
 	rad          map[string]bool // using a bool placeholder here for later RAD options
 	staticRoutes map[string]string
 	ospfRoutes   map[string]*ospf
@@ -77,10 +78,16 @@ func (r *Router) String() string {
 		}
 		sort.Strings(keys)
 		for _, ip := range keys {
-			host := r.dns[ip]
-			fmt.Fprintf(&o, "%v\t%v\n", ip, host)
+			hosts := r.dns[ip]
+			for _, host := range hosts {
+				fmt.Fprintf(&o, "%v\t%v\n", ip, host)
+			}
 		}
 		fmt.Fprintln(&o)
+	}
+
+	if r.upstream != "" {
+		fmt.Fprintf(&o, "Upstream DNS: %v\n", r.upstream)
 	}
 
 	if len(r.rad) > 0 {
@@ -121,13 +128,7 @@ func (r *Router) String() string {
 		}
 	}
 
-	vm := vms.FindVM(fmt.Sprintf("%v", r.vmID))
-	if vm == nil { // this really shouldn't ever happen
-		log.Error("could not find vm: %v", r.vmID)
-		return ""
-	}
-
-	lines := strings.Split(vm.Tag("minirouter_log"), "\n")
+	lines := strings.Split(r.vm.Tag("minirouter_log"), "\n")
 
 	fmt.Fprintln(&o, "Log:")
 	for _, v := range lines {
@@ -171,8 +172,13 @@ func (r *Router) generateConfig() error {
 			fmt.Fprintf(&out, "dnsmasq dhcp static %v %v %v\n", d.addr, mac, ip)
 		}
 	}
-	for ip, host := range r.dns {
-		fmt.Fprintf(&out, "dnsmasq dns %v %v\n", ip, host)
+	for ip, hosts := range r.dns {
+		for _, host := range hosts {
+			fmt.Fprintf(&out, "dnsmasq dns %v %v\n", ip, host)
+		}
+	}
+	if r.upstream != "" {
+		fmt.Fprintf(&out, "dnsmasq upstream %v\n", r.upstream)
 	}
 	for subnet, _ := range r.rad {
 		fmt.Fprintf(&out, "dnsmasq ra %v\n", subnet)
@@ -191,7 +197,7 @@ func (r *Router) generateConfig() error {
 	}
 	fmt.Fprintf(&out, "bird commit\n")
 
-	filename := filepath.Join(*f_iomBase, fmt.Sprintf("minirouter-%v", r.vmID))
+	filename := filepath.Join(*f_iomBase, fmt.Sprintf("minirouter-%v", r.vm.GetName()))
 	return ioutil.WriteFile(filename, out.Bytes(), 0644)
 }
 
@@ -205,11 +211,11 @@ func FindOrCreateRouter(vm VM) *Router {
 		return r
 	}
 	r := &Router{
-		vmID:         id,
+		vm:           vm,
 		IPs:          [][]string{},
 		logLevel:     "error",
 		dhcp:         make(map[string]*dhcp),
-		dns:          make(map[string]string),
+		dns:          make(map[string][]string),
 		rad:          make(map[string]bool),
 		staticRoutes: make(map[string]string),
 		ospfRoutes:   make(map[string]*ospf),
@@ -243,7 +249,7 @@ func (r *Router) Commit() error {
 	r.updateIPs = false // IPs are no longer stale
 
 	// remove any previous commands
-	prefix := fmt.Sprintf("minirouter-%v", r.vmID)
+	prefix := fmt.Sprintf("minirouter-%v", r.vm.GetName())
 	ids := ccPrefixIDs(prefix)
 	if len(ids) != 0 {
 		for _, v := range ids {
@@ -265,11 +271,10 @@ func (r *Router) Commit() error {
 		}
 	}
 
-	// filter on the minirouter tag
-	filter := &ron.Client{
-		Tags: make(map[string]string),
+	filter := &ron.Filter{
+		Namespace: r.vm.GetNamespace(),
+		UUID:      r.vm.GetUUID(),
 	}
-	filter.Tags["minirouter"] = fmt.Sprintf("%v", r.vmID)
 
 	// issue cc commands for this router
 	cmd := &ron.Command{
@@ -469,17 +474,27 @@ func (d *dhcp) String() string {
 }
 
 func (r *Router) DNSAdd(ip, hostname string) {
-	r.dns[ip] = hostname
+	r.dns[ip] = append(r.dns[ip], hostname)
 }
 
 func (r *Router) DNSDel(ip string) error {
 	if ip == "" {
-		r.dns = make(map[string]string)
+		r.dns = make(map[string][]string)
 	} else if _, ok := r.dns[ip]; ok {
 		delete(r.dns, ip)
 	} else {
 		return fmt.Errorf("no such ip: %v", ip)
 	}
+	return nil
+}
+
+func (r *Router) Upstream(ip string) {
+	r.upstream = ip
+}
+
+func (r *Router) UpstreamDel() error {
+	r.upstream = ""
+
 	return nil
 }
 

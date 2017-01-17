@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"minicli"
 	log "minilog"
 	"os"
@@ -201,7 +202,7 @@ func cliMeshageStatus(c *minicli.Command, resp *minicli.Response) error {
 	degree := meshageNode.GetDegree()
 	nodes := len(mesh)
 
-	resp.Header = []string{"mesh size", "degree", "peers", "context", "port"}
+	resp.Header = []string{"size", "degree", "peers", "context", "port"}
 	resp.Tabular = [][]string{
 		[]string{
 			strconv.Itoa(nodes),
@@ -223,6 +224,11 @@ func cliMeshageTimeout(c *minicli.Command, resp *minicli.Response) error {
 		}
 
 		meshageTimeout = time.Duration(timeout) * time.Second
+		// If the timeout is 0, set to "unlimited"
+		if meshageTimeout == 0 {
+			meshageTimeout = math.MaxInt64
+		}
+
 		return nil
 	}
 

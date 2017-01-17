@@ -51,10 +51,6 @@ With a namespace, clear namespace deletes the specified namespace.`,
 	},
 }
 
-func init() {
-	registerHandlers("namespace", namespaceCLIHandlers)
-}
-
 func cliNamespace(c *minicli.Command, respChan chan<- minicli.Responses) {
 	resp := &minicli.Response{Host: hostname}
 
@@ -101,7 +97,7 @@ Taps: %v
 Number of queuedVMs: %v
 
 Schedules:
-`, namespace, ranges.UnsplitList(hosts), ns.Taps, len(ns.queuedVMs))
+`, namespace, ranges.UnsplitList(hosts), ns.Taps, len(ns.queue))
 
 	var o bytes.Buffer
 	w := new(tabwriter.Writer)

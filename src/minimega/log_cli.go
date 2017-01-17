@@ -58,6 +58,19 @@ out all logging messages containing the word "foo":
 		},
 		Call: wrapSimpleCLI(cliLogFilter),
 	},
+	{ // log syslog
+		HelpShort: "log to syslog",
+		HelpLong: `
+Log to a syslog daemon on the provided network and address. For example, to log
+over UDP to a syslog server foo on port 514:
+
+	log syslog udp foo:514`,
+		Patterns: []string{
+			"log syslog remote <tcp,udp> <address>",
+			"log syslog <local,>",
+		},
+		Call: wrapSimpleCLI(cliLogSyslog),
+	},
 	{ // clear log
 		HelpShort: "reset state for logging",
 		HelpLong: `
@@ -68,6 +81,7 @@ Resets state for logging. See "help log ..." for more information.`,
 			"clear log <level,>",
 			"clear log <stderr,>",
 			"clear log <filter,>",
+			"clear log <syslog,>",
 		},
 		Call: wrapSimpleCLI(cliLogClear),
 	},
@@ -76,7 +90,7 @@ Resets state for logging. See "help log ..." for more information.`,
 func cliLogLevel(c *minicli.Command, resp *minicli.Response) error {
 	if len(c.BoolArgs) == 0 {
 		// Print the level
-		resp.Response = *f_loglevel
+		resp.Response = *log.Level
 		return nil
 	}
 
@@ -87,11 +101,12 @@ func cliLogLevel(c *minicli.Command, resp *minicli.Response) error {
 			return errors.New("unreachable")
 		}
 
-		*f_loglevel = k
+		*log.Level = k
 		// forget the error, if they don't exist we shouldn't be setting
 		// their level, so we're fine.
 		log.SetLevel("stdio", level)
 		log.SetLevel("file", level)
+		log.SetLevel("syslog", level)
 	}
 
 	return nil
@@ -107,13 +122,13 @@ func cliLogStderr(c *minicli.Command, resp *minicli.Response) error {
 		resp.Response = strconv.FormatBool(err == nil)
 	} else if c.BoolArgs["true"] {
 		// Enable stderr logging or adjust the level if already enabled
-		level, _ := log.LevelInt(*f_loglevel)
+		level, _ := log.LevelInt(*log.Level)
 		_, err := log.GetLevel("stdio")
 		if err != nil {
 			log.AddLogger("stdio", os.Stderr, level, true)
 		} else {
 			// TODO: Why do this? cliLogLevel updates stdio level whenever
-			// f_loglevel is changed.
+			// log.FLogLevel is changed.
 			log.SetLevel("stdio", level)
 		}
 	}
@@ -132,7 +147,7 @@ func cliLogFile(c *minicli.Command, resp *minicli.Response) error {
 	}
 
 	// Enable logging to file if it's not already enabled
-	level, _ := log.LevelInt(*f_loglevel)
+	level, _ := log.LevelInt(*log.Level)
 
 	if logFile != nil {
 		if err := stopFileLogger(); err != nil {
@@ -153,6 +168,26 @@ func cliLogFile(c *minicli.Command, resp *minicli.Response) error {
 
 	log.AddLogger("file", logFile, level, false)
 	return nil
+}
+
+func cliLogSyslog(c *minicli.Command, resp *minicli.Response) error {
+	var network string
+	var address string
+
+	if c.BoolArgs["local"] {
+		network = "local"
+	} else {
+		address = c.StringArgs["address"]
+		if c.BoolArgs["tcp"] {
+			network = "tcp"
+		} else {
+			network = "udp"
+		}
+	}
+
+	level, _ := log.LevelInt(*log.Level)
+
+	return log.AddSyslog(network, address, "minimega", level)
 }
 
 func cliLogFilter(c *minicli.Command, resp *minicli.Response) error {
@@ -202,10 +237,15 @@ func cliLogClear(c *minicli.Command, resp *minicli.Response) error {
 		}
 	}
 
+	// Reset syslog if explicitly cleared or we're clearing everything
+	if c.BoolArgs["syslog"] || len(c.BoolArgs) == 0 {
+		log.DelLogger("syslog")
+	}
+
 	// Reset level if explicitly cleared or we're clearing everything
 	if c.BoolArgs["level"] || len(c.BoolArgs) == 0 {
 		// Reset to default level
-		*f_loglevel = "error"
+		*log.Level = "error"
 		log.SetLevel("stdio", log.ERROR)
 		log.SetLevel("file", log.ERROR)
 	}

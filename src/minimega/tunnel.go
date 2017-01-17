@@ -12,88 +12,69 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
 	log "minilog"
 	"net"
-	"net/http"
 	"strings"
-	"vnc"
-	"websocket"
+
+	"golang.org/x/net/websocket"
 )
 
-const VNC_WS_BUF = 32768
+func tunnelHandler(ws *websocket.Conn) {
+	// URL should be of the form `/tunnel/<name>`
+	path := strings.Trim(ws.Config().Location.Path, "/")
 
-func vncWsHandler(w http.ResponseWriter, r *http.Request) {
-	// we assume that if we got here, then the url must be sane and of
-	// the format /ws/<host>/<port>
-	path := r.URL.Path
-	if !strings.HasSuffix(path, "/") {
-		path += "/"
-	}
 	fields := strings.Split(path, "/")
-	if len(fields) != 5 {
-		http.NotFound(w, r)
+	if len(fields) != 2 {
 		return
 	}
-	fields = fields[2:]
+	name := fields[1]
 
-	rhost := fmt.Sprintf("%v:%v", fields[0], fields[1])
+	vms := GlobalVMs()
+	vm := vms.findVM(name, true)
+	if vm == nil {
+		log.Errorln(vmNotFound(name))
+		return
+	}
+
+	var port int
+
+	switch vm.GetType() {
+	case KVM:
+		// Undocumented "feature" of websocket -- need to set to PayloadType in
+		// order for a direct io.Copy to work.
+		ws.PayloadType = websocket.BinaryFrame
+
+		port = vm.(*KvmVM).VNCPort
+	case Android:
+		// See above.
+		ws.PayloadType = websocket.BinaryFrame
+
+		port = vm.(*AndroidVM).VNCPort
+	case CONTAINER:
+		// See above. The javascript terminal needs it to be a TextFrame.
+		ws.PayloadType = websocket.TextFrame
+
+		port = vm.(*ContainerVM).ConsolePort
+	default:
+		log.Error("unknown VM type: %v", vm.GetType())
+		return
+	}
 
 	// connect to the remote host
+	rhost := fmt.Sprintf("%v:%v", vm.GetHost(), port)
 	remote, err := net.Dial("tcp", rhost)
 	if err != nil {
 		log.Errorln(err)
-		http.StatusText(500)
 		return
 	}
+	defer remote.Close()
 
-	websocket.Handler(func(ws *websocket.Conn) {
-		go func() {
-			decoder := base64.NewDecoder(base64.StdEncoding, ws)
-			tee := io.TeeReader(decoder, remote)
+	log.Info("ws client connected to %v", rhost)
 
-			for {
-				// Read
-				msg, err := vnc.ReadClientMessage(tee)
-				if err != nil {
-					if err == io.EOF || strings.Contains(err.Error(), "closed network") {
-						break
-					}
+	go io.Copy(ws, remote)
+	io.Copy(remote, ws)
 
-					log.Debugln(err)
-					continue
-				}
-
-				if r, ok := vncKBRecording[rhost]; ok {
-					r.RecordMessage(msg)
-				}
-			}
-
-			remote.Close()
-		}()
-		func() {
-			sbuf := make([]byte, VNC_WS_BUF)
-			dbuf := make([]byte, 2*VNC_WS_BUF)
-			for {
-				n, err := remote.Read(sbuf)
-				if err != nil {
-					if !strings.Contains(err.Error(), "closed network connection") && err != io.EOF {
-						log.Errorln(err)
-					}
-					break
-				}
-				base64.StdEncoding.Encode(dbuf, sbuf[0:n])
-				n = base64.StdEncoding.EncodedLen(n)
-
-				_, err = ws.Write(dbuf[0:n])
-				if err != nil {
-					log.Errorln(err)
-					break
-				}
-			}
-			ws.Close()
-		}()
-	}).ServeHTTP(w, r)
+	log.Info("ws client disconnected from %v", rhost)
 }

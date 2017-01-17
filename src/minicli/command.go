@@ -21,7 +21,13 @@ type Command struct {
 
 	Call CLIFunc `json:"-"`
 
-	Record bool // record command in history (or not), default is true
+	// Record command in history (or not). Checked after the command is
+	// executed so the CLIFunc can set Record according to its own logic.
+	Record bool
+
+	// Preprocess controls whether the Preprocessor is run for this command or
+	// not. Must be set before the Command is executed.
+	Preprocess bool
 
 	// Set when the command is intentionally a NoOp (the original string
 	// contains just a comment). This was added to ensure that lines containing
@@ -36,7 +42,6 @@ type Command struct {
 func newCommand(pattern patternItems, input *Input, call CLIFunc) (*Command, int, bool) {
 	exact := true
 	cmd := Command{
-		Pattern:    pattern.String(),
 		Original:   input.Original,
 		StringArgs: make(map[string]string),
 		BoolArgs:   make(map[string]bool),
@@ -139,5 +144,14 @@ func (c *Command) SetRecord(record bool) {
 
 	if c.Subcommand != nil {
 		c.Subcommand.SetRecord(record)
+	}
+}
+
+// SetPreprocess sets the Preprocess field for a command and all nested subcommands.
+func (c *Command) SetPreprocess(v bool) {
+	c.Preprocess = v
+
+	if c.Subcommand != nil {
+		c.Subcommand.SetPreprocess(v)
 	}
 }

@@ -48,6 +48,8 @@ router takes a number of subcommands:
 
 - 'dns': Set DNS records for IPv4 or IPv6 hosts.
 
+- 'upstream': Set upstream server for DNS.
+
 - 'ra': Enable neighbor discovery protocol router advertisements for a given
   subnet.
 
@@ -71,6 +73,7 @@ router takes a number of subcommands:
 			"router <vm> <dhcp,> <listen address> <dns,> <address>",
 			"router <vm> <dhcp,> <listen address> <static,> <mac> <ip>",
 			"router <vm> <dns,> <ip> <hostname>",
+			"router <vm> <upstream,> <ip>",
 			"router <vm> <ra,> <subnet>",
 			"router <vm> <route,> <static,> <network> <next-hop>",
 			"router <vm> <route,> <ospf,> <area> <network>",
@@ -81,6 +84,7 @@ router takes a number of subcommands:
 		HelpShort: "",
 		HelpLong:  ``,
 		Patterns: []string{
+			"clear router",
 			"clear router <vm>",
 			"clear router <vm> <interface,>",
 			"clear router <vm> <interface,> <network>",
@@ -94,6 +98,7 @@ router takes a number of subcommands:
 			"clear router <vm> <dhcp,> <listen address> <static,> <mac>",
 			"clear router <vm> <dns,>",
 			"clear router <vm> <dns,> <ip>",
+			"clear router <vm> <upstream,>",
 			"clear router <vm> <ra,>",
 			"clear router <vm> <ra,> <subnet>",
 			"clear router <vm> <route,>",
@@ -173,6 +178,10 @@ func cliRouter(c *minicli.Command, resp *minicli.Response) error {
 		hostname := c.StringArgs["hostname"]
 		rtr.DNSAdd(ip, hostname)
 		return nil
+	} else if c.BoolArgs["upstream"] {
+		ip := c.StringArgs["ip"]
+		rtr.Upstream(ip)
+		return nil
 	} else if c.BoolArgs["ra"] {
 		subnet := c.StringArgs["subnet"]
 		rtr.RADAdd(subnet)
@@ -195,6 +204,14 @@ func cliRouter(c *minicli.Command, resp *minicli.Response) error {
 
 func cliClearRouter(c *minicli.Command, resp *minicli.Response) error {
 	vmName := c.StringArgs["vm"]
+
+	// clear all routers
+	if vmName == "" {
+		// this is safe to do because the only reference to the router
+		// map is in CLI calls
+		routers = make(map[int]*Router)
+		return nil
+	}
 
 	vm := vms.FindVM(vmName)
 	if vm == nil {
@@ -251,6 +268,8 @@ func cliClearRouter(c *minicli.Command, resp *minicli.Response) error {
 	} else if c.BoolArgs["dns"] {
 		ip := c.StringArgs["ip"]
 		return rtr.DNSDel(ip)
+	} else if c.BoolArgs["upstream"] {
+		return rtr.UpstreamDel()
 	} else if c.BoolArgs["ra"] {
 		subnet := c.StringArgs["subnet"]
 		return rtr.RADDel(subnet)

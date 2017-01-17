@@ -24,12 +24,13 @@ const (
 )
 
 type Flags struct {
-	Annotate bool
-	Compress bool
-	Headers  bool
-	Sort     bool
-	Mode     int
-	Record   bool
+	Annotate   bool
+	Compress   bool
+	Headers    bool
+	Sort       bool
+	Preprocess bool
+	Mode       int
+	Record     bool
 }
 
 var flagsLock sync.Mutex
@@ -41,11 +42,12 @@ var (
 
 var defaultFlags = Flags{
 	// Output flags
-	Annotate: true,
-	Compress: true,
-	Headers:  true,
-	Sort:     true,
-	Mode:     defaultMode,
+	Annotate:   true,
+	Compress:   true,
+	Headers:    true,
+	Sort:       true,
+	Preprocess: true,
+	Mode:       defaultMode,
 
 	// Command flags
 	Record: true,
@@ -79,6 +81,17 @@ type Response struct {
 }
 
 type CLIFunc func(*Command, chan<- Responses)
+type SuggestFunc func(string, string, string) []string
+
+// Preprocessor may be set to perform actions immediately before commands run.
+var Preprocessor func(*Command) error
+
+// Reset minicli state including all registered handlers.
+func Reset() {
+	handlers = nil
+	history = nil
+	firstHistoryTruncate = true
+}
 
 // MustRegister calls Register for a handler and panics if the handler has an
 // error registering.
@@ -91,15 +104,8 @@ func MustRegister(h *Handler) {
 // Register a new API based on pattern. See package documentation for details
 // about supported patterns.
 func Register(h *Handler) error {
-	h.PatternItems = make([][]PatternItem, len(h.Patterns))
-
-	for i, pattern := range h.Patterns {
-		items, err := lexPattern(pattern)
-		if err != nil {
-			return err
-		}
-
-		h.PatternItems[i] = items
+	if err := h.parsePatterns(); err != nil {
+		return err
 	}
 
 	h.HelpShort = strings.TrimSpace(h.HelpShort)
@@ -143,6 +149,17 @@ func ProcessCommand(c *Command) <-chan Responses {
 	respChan := make(chan Responses)
 
 	go func() {
+		defer close(respChan)
+
+		// Run the preprocessor first if one is set
+		if Preprocessor != nil && c.Preprocess {
+			if err := Preprocessor(c); err != nil {
+				resp := &Response{Error: err.Error()}
+				respChan <- Responses{resp}
+				return
+			}
+		}
+
 		if !c.noOp {
 			c.Call(c, respChan)
 		}
@@ -160,8 +177,6 @@ func ProcessCommand(c *Command) <-chan Responses {
 				history = history[len(history)-HistoryLen:]
 			}
 		}
-
-		close(respChan)
 	}()
 
 	return respChan
@@ -173,7 +188,7 @@ func ProcessCommand(c *Command) <-chan Responses {
 func MustCompile(input string) *Command {
 	c, err := Compile(input)
 	if err != nil {
-		log.Fatal("unable to compile `%s` -- %v", input, err)
+		log.Fatalln(err)
 	}
 
 	return c
@@ -210,6 +225,7 @@ func Compile(input string) (*Command, error) {
 		defer flagsLock.Unlock()
 
 		cmd.Record = defaultFlags.Record
+		cmd.Preprocess = defaultFlags.Preprocess
 		return cmd, nil
 	}
 
@@ -236,10 +252,10 @@ func expandAliases(input string) string {
 	return input
 }
 
-func suggest(input *Input) []string {
+func suggest(raw string, input *Input) []string {
 	vals := map[string]bool{}
 	for _, h := range handlers {
-		for _, v := range h.suggest(input) {
+		for _, v := range h.suggest(raw, input) {
 			vals[v] = true
 		}
 	}
@@ -259,7 +275,7 @@ func Suggest(input string) []string {
 		return nil
 	}
 
-	return suggest(in)
+	return suggest(input, in)
 }
 
 //
@@ -288,6 +304,25 @@ func Help(input string) string {
 		// Only one handler with a given pattern prefix, give the long help message
 		if len(group) == 1 {
 			return group[0].helpLong()
+		}
+
+		count := 0
+		for _, v := range group {
+			if len(v.HelpLong) > 0 {
+				count += 1
+			}
+		}
+		// If only one entry has long help, do magic!
+		if count == 1 {
+			handler := &Handler{}
+			for _, v := range group {
+				handler.Patterns = append(handler.Patterns, v.Patterns...)
+				if len(v.HelpLong) > 0 {
+					handler.HelpLong = v.HelpLong
+				}
+			}
+			handler.parsePatterns()
+			return handler.helpLong()
 		}
 
 		// Weird case, multiple handlers share the same prefix. Print the short

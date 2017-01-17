@@ -32,10 +32,21 @@ const (
 	AndroidVirtioPorts = 2
 )
 
-type NumberPrefix int
+type NumberPrefix int64
 
 type AndroidConfig struct {
-	NumberPrefix int
+	// Set the telephone network number prefix for newly launched VMs. For example:
+	//
+	// 	vm config telephony 223344
+	//
+	// Would cause newly launched VMs to be assigned numbers 2233440000, 2233440001,
+	// and so on. Number blocks should not overlap, the following produces an error:
+	//
+	// 	vm config telephony 223344
+	// 	vm config telephony 22334
+	//
+	// Note: this configuration only applies to Android-based VMs.
+	NumberPrefix int64
 }
 
 type accessPoint struct {
@@ -101,13 +112,9 @@ var androidMasks = []string{
 	"kernel", "cdrom", "append", "uuid", "number", "tags",
 }
 
+// TODO get rid of this?
 func init() {
-	// Reset everything to default
-	for _, fns := range androidConfigFns {
-		fns.Clear(&vmConfig.AndroidConfig)
-	}
-
-	telephonyAllocs[vmConfig.NumberPrefix] = NewCounter()
+	telephonyAllocs[int(vmConfig.NumberPrefix)] = NewCounter()
 
 	wifiAPs = make(map[string]accessPoint)
 
@@ -136,10 +143,10 @@ func (vm *AndroidConfig) String() string {
 	return o.String()
 }
 
-func NewAndroid(name string) (*AndroidVM, error) {
+func NewAndroid(name, namespace string, config VMConfig) (*AndroidVM, error) {
 	vm := new(AndroidVM)
 
-	nkvm, err := NewKVM(name)
+	nkvm, err := NewKVM(name, namespace, config)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +186,7 @@ func (vm *AndroidVM) Copy() VM {
 	*vm2 = *vm
 
 	// We copied a locked VM so we have to unlock it too...
-	defer vm2.lock.Unlock()
+	//defer vm2.lock.Unlock()
 
 	// Make deep copies
 	vm2.BaseConfig = vm.BaseConfig.Copy()
@@ -214,7 +221,7 @@ func (vm *AndroidVM) Launch() error {
 
 	// Setup the modem
 	prefix := vm.NumberPrefix
-	vm.Number, err = NumberPrefix(prefix).Next(telephonyAllocs[prefix])
+	vm.Number, err = NumberPrefix(prefix).Next(telephonyAllocs[int(prefix)])
 	if err != nil {
 		log.Error("start telephony sensor: %v", err)
 		vm.setError(err)
@@ -297,26 +304,21 @@ func (vm *AndroidVM) runPostman(outbox chan minimodem.Message) {
 	}
 }
 
-func (vm *AndroidVM) Info(mask string) (string, error) {
-	// If it's a field handled by the KvmVM, use it.
-	if v, err := vm.KvmVM.Info(mask); err == nil {
+func (vm *AndroidVM) Info(field string) (string, error) {
+	// If the field is handled by KvmVM, return it.
+	if v, err := vm.KvmVM.Info(field); err == nil {
 		return v, nil
 	}
 
 	vm.lock.Lock()
 	defer vm.lock.Unlock()
 
-	// If it's a configurable field, use the Print fn.
-	if fns, ok := androidConfigFns[mask]; ok {
-		return fns.Print(&vm.AndroidConfig), nil
-	}
-
-	switch mask {
+	switch field {
 	case "number":
-		return fmt.Sprintf("%v", vm.Number), nil
+		return strconv.Itoa(vm.Number), nil
 	}
 
-	return "", fmt.Errorf("invalid mask: %s", mask)
+	return vm.AndroidConfig.Info(field)
 }
 
 // Print padded prefix to length 10

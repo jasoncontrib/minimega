@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func commandSocketStart() {
@@ -42,70 +43,87 @@ func commandSocketRemove() {
 }
 
 func commandSocketHandle(c net.Conn) {
-	var err error
+	defer c.Close()
 
 	enc := json.NewEncoder(c)
 	dec := json.NewDecoder(c)
 
-outer:
+	var err error
+
 	for err == nil {
-		var cmd *minicli.Command
-		cmd, err = readLocalCommand(dec)
+		var r *miniclient.Request
+
+		r, err = readLocalRequest(dec)
 		if err != nil {
-			if err != io.EOF {
-				// Must be incompatible versions of minimega... F***
-				log.Errorln(err)
-			}
 			break
 		}
-		err = nil
 
-		var prevResp minicli.Responses
-
-		if cmd != nil {
-			// HAX: Don't record the read command
-			if hasCommand(cmd, "read") {
-				cmd.SetRecord(false)
-			}
-
-			// HAX: Work around so that we can add the more boolean
-			for resp := range RunCommands(cmd) {
-				if prevResp != nil {
-					err = sendLocalResp(enc, prevResp, true)
-					if err != nil {
-						break outer
-					}
-				}
-
-				prevResp = resp
-			}
+		if r.Suggest != "" {
+			err = sendLocalSuggest(enc, minicli.Suggest(r.Suggest))
+			continue
 		}
+
+		if r.Command == nil {
+			err = sendLocalResp(enc, nil, false)
+			continue
+		}
+
+		// HAX: Don't record the read command
+		if hasCommand(r.Command, "read") {
+			r.Command.SetRecord(false)
+		}
+
+		// HAX: Work around so that we can add the more boolean.
+		var prev minicli.Responses
+
+		// Keep sending until we hit the first error, then just consume the
+		// channel to ensure that we release any locks acquired by cmd.
+		for resp := range RunCommands(r.Command) {
+			if prev != nil && err == nil {
+				err = sendLocalResp(enc, prev, true)
+			} else if err != nil && len(resp) > 0 {
+				log.Info("dropping resp from %v", resp[0].Host)
+			}
+
+			prev = resp
+		}
+
 		if err == nil {
-			err = sendLocalResp(enc, prevResp, false)
+			err = sendLocalResp(enc, prev, false)
 		}
 	}
 
-	if err != nil {
-		if err == io.EOF {
-			log.Infoln("command client disconnected")
-		} else {
-			log.Errorln(err)
-		}
+	// finally, log the error, if there was one
+	if err == nil || err == io.EOF {
+		log.Infoln("command client disconnected")
+	} else if err != nil && strings.Contains(err.Error(), "write: broken pipe") {
+		log.Infoln("command client disconnected without waiting for responses")
+	} else if err != nil {
+		log.Errorln(err)
 	}
 }
 
-func readLocalCommand(dec *json.Decoder) (*minicli.Command, error) {
-	var cmd minicli.Command
-	err := dec.Decode(&cmd)
-	if err != nil {
+func readLocalRequest(dec *json.Decoder) (*miniclient.Request, error) {
+	var r miniclient.Request
+
+	if err := dec.Decode(&r); err != nil {
 		return nil, err
 	}
 
-	log.Debug("got command over socket: %v", cmd)
+	log.Debug("got request over socket: %v", r)
 
-	// HAX: Reprocess the original command since the Call target cannot be
-	// serialized... is there a cleaner way to do this?
-	return minicli.Compile(cmd.Original)
+	if r.Command != nil {
+		// HAX: Reprocess the original command since the Call target cannot be
+		// serialized... is there a cleaner way to do this?
+		cmd, err := minicli.Compile(r.Command.Original)
+		if err != nil {
+			return nil, err
+		}
+
+		r.Command = cmd
+	}
+
+	return &r, nil
 }
 
 func sendLocalResp(enc *json.Encoder, resp minicli.Responses, more bool) error {
@@ -115,6 +133,14 @@ func sendLocalResp(enc *json.Encoder, resp minicli.Responses, more bool) error {
 	if resp != nil {
 		r.Resp = resp
 		r.Rendered = resp.String()
+	}
+
+	return enc.Encode(&r)
+}
+
+func sendLocalSuggest(enc *json.Encoder, suggest []string) error {
+	r := miniclient.Response{
+		Suggest: suggest,
 	}
 
 	return enc.Encode(&r)

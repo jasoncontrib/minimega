@@ -6,24 +6,19 @@ package main
 
 import (
 	"bridge"
-	"bytes"
 	"encoding/gob"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"ipmac"
 	log "minilog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"text/tabwriter"
 )
 
 const (
-	VM_MEMORY_DEFAULT     = "2048"
 	VM_NET_DRIVER_DEFAULT = "e1000"
 	QMP_CONNECT_RETRY     = 50
 	QMP_CONNECT_DELAY     = 100
@@ -76,7 +71,9 @@ type VM interface {
 	Conflicts(VM) error
 
 	SetCCActive(bool)
-	UpdateBW()
+	HasCC() bool
+
+	UpdateNetworks()
 
 	// NetworkConnect updates the VM's config to reflect that it has been
 	// connected to the specified bridge and VLAN.
@@ -96,38 +93,6 @@ type VM interface {
 	Copy() VM
 }
 
-// BaseConfig contains all fields common to all VM types.
-type BaseConfig struct {
-	Namespace string // namespace this VM belongs to
-	Host      string // hostname where this VM is running
-
-	Vcpus  string // number of virtual cpus
-	Memory string // memory for the vm, in megabytes
-
-	Networks []NetConfig // ordered list of networks
-
-	Snapshot bool
-	UUID     string
-	ActiveCC bool // set when CC is active
-
-	Tags map[string]string
-}
-
-// NetConfig contains all the network-related config for an interface. The IP
-// addresses are automagically populated by snooping ARP traffic. The bandwidth
-// stats are updated on-demand by calling the UpdateBW function of BaseConfig.
-type NetConfig struct {
-	VLAN   int
-	Bridge string
-	Tap    string
-	MAC    string
-	Driver string
-	IP4    string
-	IP6    string
-
-	RxRate, TxRate float64 // Most recent bandwidth measurements for Tap
-}
-
 // BaseVM provides the bare-bones for base VM functionality. It implements
 // several functions from the VM interface that are relatively common. All
 // newly created VM types will most likely embed this struct to reuse the base
@@ -135,14 +100,18 @@ type NetConfig struct {
 type BaseVM struct {
 	BaseConfig // embed
 
+	ID        int
+	Name      string
+	Namespace string // namespace this VM belongs to
+	Host      string // hostname where this VM is running
+
+	State    VMState
+	Type     VMType
+	ActiveCC bool // set when CC is active
+
 	lock sync.Mutex // synchronizes changes to this VM
 
 	kill chan bool // channel to signal the vm to shut down
-
-	ID    int
-	Name  string
-	State VMState
-	Type  VMType
 
 	instancePath string
 }
@@ -153,11 +122,13 @@ var vmInfo = []string{
 	"id", "name", "state", "namespace", "type", "uuid", "cc_active",
 	// network fields
 	"vlan", "bridge", "tap", "mac", "ip", "ip6", "bandwidth", "qos",
+	// more generic fields but want next to vcpus
+	"memory",
 	// kvm fields
-	"memory", "vcpus", "disk", "snapshot", "initrd", "kernel", "cdrom",
-	"migrate", "append", "serial", "virtio-serial", "vnc_port",
+	"vcpus", "disk", "snapshot", "initrd", "kernel", "cdrom", "migrate",
+	"append", "serial-ports", "virtio-ports", "vnc_port",
 	// container fields
-	"filesystem", "hostname", "init", "preinit", "fifo",
+	"filesystem", "hostname", "init", "preinit", "fifo", "console_port",
 	// more generic fields (tags can be huge so throw it at the end)
 	"tags",
 }
@@ -168,19 +139,12 @@ var vmInfoLite = []string{
 	"id", "name", "state", "namespace", "type", "uuid", "cc_active",
 	// network fields
 	"vlan",
-	// kvm fields
-	"vnc_port",
 }
 
 func init() {
 	killAck = make(chan int)
 
 	vmID = NewCounter()
-
-	// Reset everything to default
-	for _, fns := range baseConfigFns {
-		fns.Clear(&vmConfig.BaseConfig)
-	}
 
 	// for serializing VMs
 	gob.Register(VMs{})
@@ -189,25 +153,25 @@ func init() {
 	gob.Register(&AndroidVM{})
 }
 
-func NewVM(name string, vmType VMType) (VM, error) {
+func NewVM(name, namespace string, vmType VMType, config VMConfig) (VM, error) {
 	switch vmType {
 	case KVM:
-		return NewKVM(name)
+		return NewKVM(name, namespace, config)
 	case CONTAINER:
-		return NewContainer(name)
+		return NewContainer(name, namespace, config)
 	case Android:
-		return NewAndroid(name)
+		return NewAndroid(name, namespace, config)
 	}
 
 	return nil, errors.New("unknown VM type")
 }
 
-// NewBaseVM creates a new VM, copying the currently set configs. After a VM is
+// NewBaseVM creates a new VM, copying the specified configs. After a VM is
 // created, it can be Launched.
-func NewBaseVM(name string) *BaseVM {
+func NewBaseVM(name, namespace string, config VMConfig) *BaseVM {
 	vm := new(BaseVM)
 
-	vm.BaseConfig = vmConfig.BaseConfig.Copy() // deep-copy configured fields
+	vm.BaseConfig = config.BaseConfig.Copy() // deep-copy configured fields
 	vm.ID = vmID.Next()
 	if name == "" {
 		vm.Name = fmt.Sprintf("vm-%d", vm.ID)
@@ -215,12 +179,17 @@ func NewBaseVM(name string) *BaseVM {
 		vm.Name = name
 	}
 
-	vm.Namespace = GetNamespaceName()
 	vm.Host = hostname
+	vm.Namespace = namespace
 
 	// generate a UUID if we don't have one
 	if vm.UUID == "" {
 		vm.UUID = generateUUID()
+	}
+
+	// Initialize tags, if not already
+	if vm.Tags == nil {
+		vm.Tags = map[string]string{}
 	}
 
 	// generate MAC addresses if any are unassigned. Don't bother checking
@@ -243,6 +212,24 @@ func NewBaseVM(name string) *BaseVM {
 	vm.lock.Lock()
 
 	return vm
+}
+
+// copy a BaseVM... assume that lock is held.
+func (vm *BaseVM) copy() *BaseVM {
+	vm2 := new(BaseVM)
+
+	// Make copies of all fields except lock/kill
+	vm2.BaseConfig = vm.BaseConfig.Copy()
+	vm2.ID = vm.ID
+	vm2.Name = vm.Name
+	vm2.Namespace = vm.Namespace
+	vm2.Host = vm.Host
+	vm2.State = vm.State
+	vm2.Type = vm.Type
+	vm2.ActiveCC = vm.ActiveCC
+	vm2.instancePath = vm.instancePath
+
+	return vm2
 }
 
 func (s VMType) String() string {
@@ -281,102 +268,6 @@ func findVMType(args map[string]bool) (VMType, error) {
 	}
 
 	return 0, errors.New("invalid VMType")
-}
-
-// TODO: Handle if there are spaces or commas in the tap/bridge names
-func (net NetConfig) String() (s string) {
-	parts := []string{}
-	if net.Bridge != "" {
-		parts = append(parts, net.Bridge)
-	}
-
-	parts = append(parts, printVLAN(net.VLAN))
-
-	if net.MAC != "" {
-		parts = append(parts, net.MAC)
-	}
-
-	return strings.Join(parts, ",")
-}
-
-func (old BaseConfig) Copy() BaseConfig {
-	// Copy all fields
-	res := old
-
-	// Make deep copy of slices
-	res.Networks = make([]NetConfig, len(old.Networks))
-	copy(res.Networks, old.Networks)
-
-	// Make deep copy of tags
-	res.Tags = map[string]string{}
-	for k, v := range old.Tags {
-		res.Tags[k] = v
-	}
-
-	return res
-}
-
-func (vm *BaseConfig) String() string {
-	// create output
-	var o bytes.Buffer
-	fmt.Fprintln(&o, "Current VM configuration:")
-	w := new(tabwriter.Writer)
-	w.Init(&o, 5, 0, 1, ' ', 0)
-	fmt.Fprintf(w, "Memory:\t%v\n", vm.Memory)
-	fmt.Fprintf(w, "VCPUS:\t%v\n", vm.Vcpus)
-	fmt.Fprintf(w, "Networks:\t%v\n", vm.NetworkString())
-	fmt.Fprintf(w, "Snapshot:\t%v\n", vm.Snapshot)
-	fmt.Fprintf(w, "UUID:\t%v\n", vm.UUID)
-	fmt.Fprintf(w, "Tags:\t%v\n", vm.TagsString())
-	w.Flush()
-	fmt.Fprintln(&o)
-	return o.String()
-}
-
-func (vm *BaseConfig) NetworkString() string {
-	parts := []string{}
-	for _, net := range vm.Networks {
-		parts = append(parts, net.String())
-	}
-
-	return fmt.Sprintf("[%s]", strings.Join(parts, " "))
-}
-
-func (vm *BaseConfig) QosString(b, t, i string) string {
-	var val string
-	br, err := getBridge(b)
-	if err != nil {
-		return val
-	}
-
-	ops := br.GetQos(t)
-	if ops == nil {
-		return ""
-	}
-
-	val += fmt.Sprintf("%s: ", i)
-	for _, op := range ops {
-		if op.Type == bridge.Delay {
-			val += fmt.Sprintf("delay %s ", op.Value)
-		}
-		if op.Type == bridge.Loss {
-			val += fmt.Sprintf("loss %s ", op.Value)
-		}
-		if op.Type == bridge.Rate {
-			val += fmt.Sprintf("rate %s ", op.Value)
-		}
-	}
-	return strings.Trim(val, " ")
-}
-
-func (vm *BaseConfig) TagsString() string {
-	res, err := json.Marshal(vm.Tags)
-	if err != nil {
-		log.Error("unable to marshal vm.Tags: %v", err)
-		return ""
-	}
-
-	return string(res)
 }
 
 func (vm *BaseVM) GetID() int {
@@ -442,8 +333,6 @@ func (vm *BaseVM) Kill() error {
 }
 
 func (vm *BaseVM) Flush() error {
-	ccNode.UnregisterVM(vm.UUID)
-
 	return os.RemoveAll(vm.instancePath)
 }
 
@@ -484,7 +373,7 @@ func (vm *BaseVM) ClearTag(t string) {
 	}
 }
 
-func (vm *BaseVM) UpdateBW() {
+func (vm *BaseVM) UpdateNetworks() {
 	vm.lock.Lock()
 	defer vm.lock.Unlock()
 
@@ -498,6 +387,9 @@ func (vm *BaseVM) UpdateBW() {
 		}
 
 		n.RxRate, n.TxRate = tap.BandwidthStats()
+
+		n.IP4 = tap.IP4
+		n.IP6 = tap.IP6
 	}
 }
 
@@ -582,6 +474,13 @@ func (vm *BaseVM) SetCCActive(active bool) {
 	vm.ActiveCC = active
 }
 
+func (vm *BaseVM) HasCC() bool {
+	vm.lock.Lock()
+	defer vm.lock.Unlock()
+
+	return vm.ActiveCC
+}
+
 func (vm *BaseVM) NetworkConnect(pos int, bridge string, vlan int) error {
 	vm.lock.Lock()
 	defer vm.lock.Unlock()
@@ -616,7 +515,7 @@ func (vm *BaseVM) NetworkConnect(pos int, bridge string, vlan int) error {
 	}
 
 	// Connect to the new bridge
-	if err := dst.AddTap(net.Tap, vlan, false); err != nil {
+	if err := dst.AddTap(net.Tap, net.MAC, vlan, false); err != nil {
 		return err
 	}
 
@@ -659,18 +558,14 @@ func (vm *BaseVM) NetworkDisconnect(pos int) error {
 	return nil
 }
 
-// info returns information about the VM for the provided key.
-func (vm *BaseVM) info(key string) (string, error) {
+// info returns information about the VM for the provided field.
+func (vm *BaseVM) Info(field string) (string, error) {
 	vm.lock.Lock()
 	defer vm.lock.Unlock()
 
-	if fns, ok := baseConfigFns[key]; ok {
-		return fns.Print(&vm.BaseConfig), nil
-	}
-
 	var vals []string
 
-	switch key {
+	switch field {
 	case "id":
 		return strconv.Itoa(vm.ID), nil
 	case "name":
@@ -722,11 +617,12 @@ func (vm *BaseVM) info(key string) (string, error) {
 			}
 		}
 	case "tags":
-		return vm.TagsString(), nil
+		return vm.Tags.String(), nil
 	case "cc_active":
-		return fmt.Sprintf("%v", vm.ActiveCC), nil
+		return strconv.FormatBool(vm.ActiveCC), nil
 	default:
-		return "", errors.New("field not found")
+		// at this point, hopefully field is part of BaseConfig
+		return vm.BaseConfig.Info(field)
 	}
 
 	return fmt.Sprintf("%v", vals), nil
@@ -751,19 +647,6 @@ func (vm *BaseVM) setError(err error) {
 	vm.setState(VM_ERROR)
 }
 
-// macSnooper listens for updates from the ipmac learner and updates the
-// specified network config.
-func (vm *BaseVM) macSnooper(net *NetConfig, updates <-chan ipmac.IP) {
-	for update := range updates {
-		// TODO: need to acquire VM lock?
-		if update.IP4 != "" {
-			net.IP4 = update.IP4
-		} else if update.IP6 != "" && !strings.HasPrefix(update.IP6, "fe80") {
-			net.IP6 = update.IP6
-		}
-	}
-}
-
 // writeTaps writes the vm's taps to disk in the vm's instance path.
 func (vm *BaseVM) writeTaps() error {
 	taps := []string{}
@@ -779,7 +662,7 @@ func (vm *BaseVM) writeTaps() error {
 	return nil
 }
 
-func (vm *BaseVM) conflicts(vm2 BaseVM) error {
+func (vm *BaseVM) conflicts(vm2 *BaseVM) error {
 	// Return error if two VMs have same name or UUID
 	if vm.Namespace == vm2.Namespace {
 		if vm.Name == vm2.Name {
@@ -820,23 +703,27 @@ func inNamespace(vm VM) bool {
 	return namespace == "" || vm.GetNamespace() == namespace
 }
 
-func vmNotFound(idOrName string) error {
-	return fmt.Errorf("vm not found: %v", idOrName)
+func vmNotFound(name string) error {
+	return fmt.Errorf("vm not found: %v", name)
 }
 
-func vmNotRunning(idOrName string) error {
-	return fmt.Errorf("vm not running: %v", idOrName)
+func vmNotRunning(name string) error {
+	return fmt.Errorf("vm not running: %v", name)
 }
 
-func vmNotKVM(idOrName string) error {
-	return fmt.Errorf("vm not KVM: %v", idOrName)
+func vmNotKVM(name string) error {
+	return fmt.Errorf("vm not KVM: %v", name)
 }
 
-func vmNotAndroid(idOrName string) error {
-	return fmt.Errorf("vm not Android: %v", idOrName)
+func vmNotContainer(name string) error {
+	return fmt.Errorf("vm not container: %v", name)
 }
 
-func isVmNotFound(err string) bool {
+func vmNotAndroid(name string) error {
+	return fmt.Errorf("vm not Android: %v", name)
+}
+
+func isVMNotFound(err string) bool {
 	return strings.HasPrefix(err, "vm not found: ")
 }
 
@@ -847,7 +734,7 @@ func getConfig(vm VM) BaseConfig {
 	case *ContainerVM:
 		return vm.BaseConfig
 	case *AndroidVM:
-		return vm.BaseConfig	
+		return vm.BaseConfig
 	}
 
 	return BaseConfig{}

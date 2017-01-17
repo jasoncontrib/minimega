@@ -28,9 +28,9 @@ type Handler struct {
 	// Suggest provides suggestions for variable completion. For example, the
 	// `vm stop` command might provide a listing of the currently running VM
 	// names if the user tries to tab complete the "target". The function takes
-	// two arguments: the variable name (e.g. "target") and the user's input
-	// for the variable so far.
-	Suggest func(string, string) []string `json:"-"`
+	// three arguments: the raw input string, the variable name (e.g.
+	// "target"), and the user's input for the variable so far.
+	Suggest SuggestFunc `json:"-"`
 }
 
 // compileCommand tests whether the input matches the Handler's pattern and
@@ -45,9 +45,11 @@ func (h *Handler) compile(input *Input) (*Command, int, bool) {
 	var matchLen int
 	var exact bool
 
-	for _, pattern := range h.PatternItems {
+	for i, pattern := range h.PatternItems {
 		cmd, matchLen, exact = newCommand(pattern, input, h.Call)
 		if cmd != nil {
+			// patch up patterns from original pattern strings
+			cmd.Pattern = h.Patterns[i]
 			return cmd, matchLen, exact
 		}
 
@@ -59,7 +61,20 @@ func (h *Handler) compile(input *Input) (*Command, int, bool) {
 	return nil, maxMatchLen, false
 }
 
-func (h *Handler) suggest(input *Input) []string {
+func (h *Handler) parsePatterns() error {
+	for _, pattern := range h.Patterns {
+		items, err := lexPattern(pattern)
+		if err != nil {
+			return err
+		}
+
+		h.PatternItems = append(h.PatternItems, items)
+	}
+
+	return nil
+}
+
+func (h *Handler) suggest(raw string, input *Input) []string {
 	suggestions := []string{}
 
 outer:
@@ -98,7 +113,7 @@ outer:
 			case item.Type == commandItem:
 				// This is fun, need to recurse to complete the subcommand
 				log.Debug("recursing to find suggestions for %q", input.items[i:])
-				suggestions = append(suggestions, suggest(&Input{
+				suggestions = append(suggestions, suggest(raw, &Input{
 					Original: input.Original,
 					items:    input.items[i:],
 				})...)
@@ -142,11 +157,11 @@ outer:
 				if i < len(input.items) {
 					prefix = input.items[i].Value
 				}
-				suggestions = append(suggestions, h.Suggest(item.Key, prefix)...)
+				suggestions = append(suggestions, h.Suggest(raw, item.Key, prefix)...)
 			}
 		case commandItem:
 			log.Debug("recursing to find suggestions for %q", input.items[i:])
-			suggestions = append(suggestions, suggest(&Input{
+			suggestions = append(suggestions, suggest(raw, &Input{
 				Original: input.Original,
 				items:    input.items[i:],
 			})...)

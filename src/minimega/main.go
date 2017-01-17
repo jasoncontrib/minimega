@@ -32,9 +32,6 @@ const (
 )
 
 var (
-	f_loglevel   = flag.String("level", "warn", "set log level: [debug, info, warn, error, fatal]")
-	f_log        = flag.Bool("v", true, "log on stderr")
-	f_logfile    = flag.String("logfile", "", "also log to file")
 	f_base       = flag.String("base", BASE_PATH, "base path for minimega data")
 	f_e          = flag.Bool("e", false, "execute command on running minimega")
 	f_degree     = flag.Uint("degree", 0, "meshage starting degree")
@@ -49,11 +46,14 @@ var (
 	f_attach     = flag.Bool("attach", false, "attach the minimega command line to a running instance of minimega")
 	f_cli        = flag.Bool("cli", false, "validate and print the minimega cli, in JSON, to stdout and exit")
 	f_panic      = flag.Bool("panic", false, "panic on quit, producing stack traces for debugging")
+	f_cgroup     = flag.String("cgroup", "/sys/fs/cgroup", "path to cgroup mount")
 
 	vms = VMs{}
 
 	hostname string
 	reserved = []string{Wildcard}
+
+	attached *miniclient.Conn
 )
 
 const (
@@ -78,12 +78,7 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	// Set the container globals based on the parsed args before we invoke the
-	// containerShim, if applicable.
-	CGROUP_ROOT = filepath.Join(*f_base, "cgroup")
-	CGROUP_PATH = filepath.Join(CGROUP_ROOT, "minimega")
-
-	logSetup()
+	log.Init()
 
 	// see containerShim()
 	if flag.NArg() > 1 && flag.Arg(0) == CONTAINER_MAGIC {
@@ -145,6 +140,7 @@ func main() {
 
 			mm.RunAndPrint(cmd, false)
 		} else {
+			attached = mm
 			mm.Attach()
 		}
 
@@ -257,13 +253,14 @@ func teardown() {
 	// Clear namespace so that we hit all the VMs
 	SetNamespace("")
 
-	vncClear()
 	clearAllCaptures()
-	vms.Kill(Wildcard)
+	vncClear()
 	dnsmasqKillAll()
-	ksmDisable()
+
+	vms.Kill(Wildcard)
 	vms.Flush()
-	vms.CleanDirs()
+
+	ksmDisable()
 	containerTeardown()
 
 	if err := bridgesDestroy(); err != nil {
