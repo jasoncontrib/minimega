@@ -19,7 +19,7 @@ var testPrefixes = []struct {
 func TestNextNumberPrefix(t *testing.T) {
 	for _, test := range testPrefixes {
 		prefix := NumberPrefix(test.Prefix) // XXXX
-		idChan := makeIDChan()
+		idChan := NewCounter()
 
 		for i := 0; i < test.Count; i++ {
 			want := int(prefix)*test.Count + i

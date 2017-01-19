@@ -56,10 +56,14 @@ func TestPdu(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v", err)
 		}
-		if msg.Src != jennyNumber {
+		if msg.Dst != jennyNumber {
+			t.Logf("expected: %d", jennyNumber)
+			t.Logf("unpacked: %d", msg.Src)
 			t.Fatalf("number unpacked incorrectly")
 		}
 		if msg.Message != jennyMsg {
+			t.Logf("expected: %s", jennyMsg)
+			t.Logf("unpacked: %s", msg.Message)
 			t.Fatalf("message unpacked incorrectly")
 		}
 	}
